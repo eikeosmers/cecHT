@@ -3,42 +3,50 @@ Tremor ecHT plot:
 (A) Uncalibrated phase error distribution (polar)
 (B) Calibrated phase error distribution (polar)
 (C) Mean |phase error| vs tremor-frequency CV per trial (paired points + regressions)
-
-Also:
-- Significance A vs B shown as a bracket/bar like plot.py
-- p-value from paired circular permutation (within-trial label swap)
 """
 
 import sys
 from pathlib import Path
-import importlib.util
 
 import numpy as np
 from scipy.io import loadmat
 from scipy.stats import circmean, circstd
-from scipy.signal import hilbert, butter, sosfiltfilt
+from scipy.signal import hilbert, butter, sosfiltfilt, welch
 
 from joblib import Parallel, delayed
 
+from phase import ECHT
 from utils import (
     _wrap_phase,
     make_figure
 )
 
-# ---------------------------------------------------------------------
-# Import ecHT implementation
-# ---------------------------------------------------------------------
-file_path = Path(__file__).resolve().parent.parent / "phase.py"
-spec = importlib.util.spec_from_file_location("ECHT", file_path)
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-ECHT = module.ECHT
+# Tremor frequency CV
+def _calc_cv(x_filt, freq_win_len, freq_stride, L, fs):
+    freqs_win = []
+    if L >= freq_win_len:
+        for start in range(0, L - freq_win_len + 1, freq_stride):
+            seg_f = x_filt[start:start + freq_win_len]
+            freqs, psd = welch(seg_f, fs=fs, nperseg=min(len(seg_f), freq_win_len))
+            mask = (freqs >= 0.5) & (freqs <= 20)
+            if not np.any(mask):
+                continue
+            psd_masked = psd[mask]
+            if psd_masked.size == 0:
+                continue
+            freqs_win.append(float(freqs[mask][np.argmax(psd_masked)]))
 
+    if len(freqs_win) >= 2:
+        freqs_win = np.asarray(freqs_win, dtype=float)
+        mean_f = float(np.mean(freqs_win))
+        std_f = float(np.std(freqs_win, ddof=1))
+        freq_cv = (std_f / mean_f) if mean_f != 0 else np.nan
+    else:
+        freq_cv = np.nan
 
-# ---------------------------------------------------------------------
-# Data loading (compatible with data_sbj_original_2016.mat)
-# ---------------------------------------------------------------------
+    return freq_cv
+
+# Data loading
 def iter_trials(mat_path):
     mat = loadmat(mat_path, squeeze_me=True, struct_as_record=False)
     data_all_res = mat["data_all_res"]
@@ -72,7 +80,7 @@ def collect_trials(mat_paths):
     for mat_path in mat_paths:
         mat_path = Path(mat_path)
         if not mat_path.exists():
-            print(f"[WARNING] File not found, skipping: {mat_path}")
+            print(f"File not found, skipping: {mat_path}")
             continue
         this_trials = list(iter_trials(mat_path))
         print(f"Collected {len(this_trials)} trials from {mat_path.name}")
@@ -80,9 +88,7 @@ def collect_trials(mat_paths):
     return all_trials
 
 
-# ---------------------------------------------------------------------
 # Per-trial processing
-# ---------------------------------------------------------------------
 def process_one_trial(
     x,
     phi_ds,
@@ -96,20 +102,18 @@ def process_one_trial(
     """
     Returns:
       err_unc, err_cal             : per-window endpoint errors (paired)
-      freq_cv                      : trial tremor frequency CV (FFT-based)
+      freq_cv                      : trial tremor frequency CV
       trial_abs_unc, trial_abs_cal : per-trial mean |error| (rad)
       trial_mu_unc, trial_mu_cal   : per-trial circular mean error (rad)
       n_windows                    : number of windows
     """
 
-    L = len(x)
-    if L < N:
+    if len(x) < N:
+        print(f"Window length {N} short than signal length {len(x)}")
         return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
 
-    l_freq = max(0.1, f0 - f0 / 2)
-    h_freq = min(0.5 * fs - 0.1, f0 + f0 / 2)
-    if not (0 < l_freq < h_freq < 0.5 * fs):
-        return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
+    l_freq = max(0.1, f0-f0/2)
+    h_freq = min(0.5*fs-0.1, f0+f0/2)
 
     sos = butter(filt_order, [l_freq, h_freq], fs=fs, btype="bandpass", output="sos")
     x_filt = sosfiltfilt(sos, x)
@@ -117,7 +121,7 @@ def process_one_trial(
     z_offline = hilbert(x_filt)
     phi_offline = np.angle(z_offline)
 
-    L = min(len(x_filt), len(phi_offline), len(phi_ds))
+    L = min(len(x_filt), len(phi_offline), len(phi_ds)) # if nothing is broken, they should be the same length
     x_filt = x_filt[:L]
     phi_offline = phi_offline[:L]
 
@@ -125,7 +129,7 @@ def process_one_trial(
 
     echt_unc = ECHT(
         l_freq=l_freq, h_freq=h_freq, sfreq=fs, filt_order=filt_order,
-        calibrate=False, f0=None
+        calibrate=False,
     )
     echt_unc.fit(first_seg)
 
@@ -135,9 +139,7 @@ def process_one_trial(
     )
     echt_cal.fit(first_seg)
 
-    out_len = L - (N - 1)
-    if out_len <= 0:
-        return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
+    out_len = L - (N-1)
 
     err_unc = np.empty(out_len, dtype=float)
     err_cal = np.empty(out_len, dtype=float)
@@ -147,8 +149,8 @@ def process_one_trial(
         start_idx = end_idx - N + 1
         seg = x_filt[start_idx:end_idx + 1]
 
-        zu = np.squeeze(np.asarray(echt_unc.transform(seg)))
-        zc = np.squeeze(np.asarray(echt_cal.transform(seg)))
+        zu = np.squeeze(echt_unc.transform(seg))
+        zc = np.squeeze(echt_cal.transform(seg))
 
         phi_unc_end = np.angle(zu[-1])
         phi_cal_end = np.angle(zc[-1])
@@ -158,36 +160,16 @@ def process_one_trial(
         err_cal[k] = _wrap_phase(phi_cal_end - phi_true_end)
         k += 1
 
-    trial_abs_unc = float(np.mean((err_unc)))
-    trial_abs_cal = float(np.mean((err_cal)))
-    trial_mu_unc = float(circmean(err_unc, high=np.pi, low=-np.pi))
-    trial_mu_cal = float(circmean(err_cal, high=np.pi, low=-np.pi))
+    trial_abs_unc = np.mean(np.abs(err_unc))
+    trial_abs_cal = np.mean(np.abs(err_cal))
+    trial_mu_unc = circmean(err_unc, high=np.pi, low=-np.pi)
+    trial_mu_cal = circmean(err_cal, high=np.pi, low=-np.pi)
     n_windows = int(err_unc.size)
 
-    # Tremor frequency CV (dominant FFT frequency per window)
-    freqs_win = []
-    if L >= freq_win_len:
-        for start in range(0, L - freq_win_len + 1, freq_stride):
-            seg_f = x_filt[start:start + freq_win_len]
-            Xf = np.fft.rfft(seg_f)
-            freqs = np.fft.rfftfreq(len(seg_f), d=1 / fs)
-            mask = (freqs >= 0.5) & (freqs <= 20)
-            if not np.any(mask):
-                continue
-            mag = np.abs(Xf[mask])
-            if mag.size == 0:
-                continue
-            freqs_win.append(float(freqs[mask][np.argmax(mag)]))
+    # Tremor frequency CV
+    freq_cv = _calc_cv(x_filt, freq_win_len, freq_stride, L, fs)
 
-    if len(freqs_win) >= 2:
-        freqs_win = np.asarray(freqs_win, dtype=float)
-        mean_f = float(np.mean(freqs_win))
-        std_f = float(np.std(freqs_win, ddof=1))
-        freq_cv = (std_f / mean_f) if mean_f != 0 else np.nan
-    else:
-        freq_cv = np.nan
-
-    return (err_unc, err_cal, freq_cv, trial_abs_unc, trial_abs_cal, trial_mu_unc, trial_mu_cal, n_windows)
+    return err_unc, err_cal, freq_cv, trial_abs_unc, trial_abs_cal, trial_mu_unc, trial_mu_cal, n_windows
 
 
 def compute_endpoint_errors(
@@ -257,9 +239,7 @@ def compute_endpoint_errors(
     )
 
 
-# ---------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------
 def main():
     if len(sys.argv) > 1:
         mat_paths = sys.argv[1:]
@@ -304,9 +284,9 @@ def main():
         return
 
     mean_unc = _wrap_phase(circmean(err_unc, high=np.pi, low=-np.pi))
-    std_unc = circstd(err_unc)
+    std_unc = circstd(err_unc, high=np.pi, low=-np.pi)
     mean_cal = _wrap_phase(circmean(err_cal, high=np.pi, low=-np.pi))
-    std_cal = circstd(err_cal)
+    std_cal = circstd(err_cal, high=np.pi, low=-np.pi)
 
     print("\nSummary of ecHT vs offline Hilbert reference")
     print(f"Mean uncalibrated error (deg): {np.degrees(mean_unc):.2f} ± {np.degrees(std_unc):.2f}")
@@ -325,7 +305,7 @@ def main():
         n_perm=int(1e5),
         perm_seed=0,
         panel_c_xlabel="Tremor frequency CV",
-        panel_c_title=r"$\mathbf{(C)}$ Phase error vs. tremor variability",
+        panel_c_title=r"$\mathbf{c}$ Phase error vs. tremor variability",
     )
 
 
