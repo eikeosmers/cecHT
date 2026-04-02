@@ -32,7 +32,7 @@ pip install -r requirements.txt
 ### Using (c)ecHT in your own script
 Minimal working example
 
-```bash
+```python
 import numpy as np
 from phase import ECHT
 
@@ -73,7 +73,7 @@ for k, end_idx in enumerate(range(N - 1, len(x))):
 ### Experiment 1: Simulations
 Investigate the performance of ecHT and cecHT on ideal data.
 
-```bash
+```python
 # Static performance
 python simulations/simple.py
 # Deeper simulations
@@ -85,7 +85,7 @@ python simulations/latency.py
 ### Experiment 2: EEG data
 How does ecHT and cecHT perform on real EEG data based on the HMC dataset.
 
-```bash
+```python
 python HMC/eeg_phase.py
 python HMC/eeg_plot.py
 ```
@@ -93,7 +93,7 @@ python HMC/eeg_plot.py
 ### Experiment 3: Tremor data
 ecHT and cecHT performance on tremor data from Schreglmann et al.
 
-```bash
+```python
 # w/o frequency tracking
 python tremor/tremor_echt.py
 # w/ frequency tracking
@@ -124,8 +124,7 @@ data based on Schregelmann et al. (2021). Download the datasets at the link belo
 │   ├── latency.py                  # Latency analysis on your machine
 │   └── simple.py/                  # Reproduction of Schreglmann et al.'s first experiment
 ├── tremor/                         # Tremor experiments
-│   ├── tremor_echt.py              # ECHT performance on tremor data
-│   └── tremor_echt_track.py        # Same as above w/ frequency tracking
+│   └── tremor_echt.py              # ECHT performance on tremor data, w/ and w/o frequency tracking
 ├── phase.py                        # Main function, contains ECHT class
 ├── phase_track.py                  # frequency tracking variant of phase.py
 ├── README.md                       # This file
