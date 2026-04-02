@@ -60,7 +60,7 @@ ecHT and cecHT performance on tremor data from Schreglmann et al.
 # w/o frequency tracking
 python tremor/tremor_echt.py
 # w/ frequency tracking
-python tremor/tremor_echt_track.py
+python tremor/tremor_echt.py --track
 ```
 
 ---
