@@ -64,7 +64,7 @@ def _circ_stats(phi_rad):
         return np.nan, np.nan, np.nan, np.nan
 
     mu = float(circmean(phi, high=np.pi, low=-np.pi))
-    sd = float(circstd(phi))
+    sd = float(circstd(phi, high=np.pi, low=-np.pi))
     plv = float(np.abs(np.mean(np.exp(1j * phi))))
     pli = float(np.abs(np.mean(np.sign(np.sin(phi)))))
 
@@ -127,6 +127,42 @@ def circular_permutation_test_paired(
     return float(np.degrees(T_obs)), float(p)
 
 # ---------------------------------------------------------------------
+# Shared ECHT sliding-window loop
+# ---------------------------------------------------------------------
+def run_echt_window_loop(x, ref_phase, echt_unc, echt_cal, win_len,
+                         f0_seq=None):
+    """Sliding-window ecHT phase-error loop shared by EEG and tremor pipelines.
+
+    Parameters
+    ----------
+    x         : 1-D array  (signal)
+    ref_phase : 1-D array  (acausal reference phase in radians, len == len(x))
+    echt_unc, echt_cal : fitted ECHT instances
+    win_len   : int
+    f0_seq    : 1-D array | None
+        Per-sample f0 values passed to transform (tremor tracking mode).
+        None → f0 argument is omitted (EEG / static mode).
+
+    Returns
+    -------
+    err_unc, err_cal : 1-D float arrays of phase errors (radians)
+    """
+    n = len(x)
+    n_out = n - (win_len - 1)
+    err_unc = np.empty(n_out, dtype=float)
+    err_cal = np.empty(n_out, dtype=float)
+
+    for k, end_idx in enumerate(range(win_len - 1, n)):
+        seg = x[end_idx - win_len + 1 : end_idx + 1]
+        f0_kw = {} if f0_seq is None else {"f0": f0_seq[end_idx]}
+        zu = np.squeeze(echt_unc.transform(seg, **f0_kw))
+        zc = np.squeeze(echt_cal.transform(seg, **f0_kw))
+        err_unc[k] = _wrap_phase(np.angle(zu[-1]) - ref_phase[end_idx])
+        err_cal[k] = _wrap_phase(np.angle(zc[-1]) - ref_phase[end_idx])
+
+    return err_unc, err_cal
+
+# ---------------------------------------------------------------------
 # Plot helpers
 # ---------------------------------------------------------------------
 def _style_polar_axis(ax, r_max, radial_ticks):
@@ -169,7 +205,7 @@ def make_figure(
     n_perm=5000,
     perm_seed=0,
     panel_c_xlabel="Tremor frequency CV",
-    panel_c_title=r"$\mathbf{(C)}$ Phase error vs. tremor variability",
+    panel_c_title=r"$\mathbf{c}$ Phase error vs. tremor variability",
 ):
     # --- stats ---
     mu_u, sd_u, plv_u, pli_u = _circ_stats(err_unc_rad)
@@ -219,11 +255,11 @@ def make_figure(
     axA.plot([mu_u, mu_u], [0, r_max], color="0", linewidth=2)
     _style_polar_axis(axA, r_max, r_ticks)
     axA.text(
-        0.05, 0.45,
-        rf"${np.degrees(mu_u):.1f}^\circ \pm {np.degrees(sd_u):.1f}^\circ$" "\n"
+        0.5, 0.45,
+        rf"${np.round(np.degrees(mu_u), 1) + 0.0:.1f}^\circ \pm {np.round(np.degrees(sd_u), 1):.1f}^\circ$" "\n"
         rf"PLV$\uparrow$: {plv_u:.3f}" "\n"
         rf"PLI$\downarrow$: {pli_u:.3f}",
-        transform=axA.transAxes, bbox=COMMON_BBOX, va="top"
+        transform=axA.transAxes, bbox=COMMON_BBOX, va="top", ha="center"
     )
 
     # --- Panel B ---
@@ -231,24 +267,24 @@ def make_figure(
     axB.plot([mu_c, mu_c], [0, r_max], color="0", linewidth=2)
     _style_polar_axis(axB, r_max, r_ticks)
     axB.text(
-        0.05, 0.45,
-        rf"${np.degrees(mu_c):.1f}^\circ \pm {np.degrees(sd_c):.1f}^\circ$" "\n"
+        0.5, 0.45,
+        rf"${np.round(np.degrees(mu_c), 1) + 0.0:.1f}^\circ \pm {np.round(np.degrees(sd_c), 1):.1f}^\circ$" "\n"
         rf"PLV$\uparrow$: {plv_c:.3f}" "\n"
         rf"PLI$\downarrow$: {pli_c:.3f}",
-        transform=axB.transAxes, bbox=COMMON_BBOX, va="top"
+        transform=axB.transAxes, bbox=COMMON_BBOX, va="top", ha="center"
     )
 
-    # --- Panel C (NO legend, NO slope text) ---
+    # --- Panel C ---
     mask = np.isfinite(trial_freq_cv) & np.isfinite(trial_abs_unc_rad) & np.isfinite(trial_abs_cal_rad)
     x = trial_freq_cv[mask]
-    y_unc = np.degrees(trial_abs_unc_rad[mask])
-    y_cal = np.degrees(trial_abs_cal_rad[mask])
+    y_unc = np.degrees(trial_mu_unc[mask])
+    y_cal = np.degrees(trial_mu_cal[mask])
 
     for xi, yu, yc in zip(x, y_unc, y_cal):
-        axC.plot([xi, xi], [yu, yc], color="0.7", linewidth=0.8, zorder=1)
+        axC.plot([xi, xi], [yu, yc], color="0.7", linewidth=0.8, zorder=1) # lines connecting each cal-unc recording
 
-    axC.scatter(x, y_unc, s=16, marker="X", facecolor=COL_HT, edgecolor="0", linewidth=0.5, zorder=3)
-    axC.scatter(x, y_cal, s=18, marker="o", facecolor=COL_ECHT, edgecolor="0", linewidth=0.5, zorder=2)
+    axC.scatter(x, y_unc, s=10, marker="X", facecolor=COL_HT, edgecolor="0", linewidth=0.5, zorder=2)
+    axC.scatter(x, y_cal, s=10, marker="o", facecolor=COL_ECHT, edgecolor="0", linewidth=0.5, zorder=3)
 
     if x.size > 2:
         xs = np.sort(x)
@@ -257,22 +293,19 @@ def make_figure(
             np.polyval(np.polyfit(x, y_unc, 1), xs),
             color=COL_HT,
             linewidth=1.2,
-            zorder=0,
+            zorder=4,
         )[0]
         line_cal = axC.plot(
             xs,
             np.polyval(np.polyfit(x, y_cal, 1), xs),
             color=COL_ECHT,
             linewidth=1.2,
-            zorder=0,
+            zorder=4,
         )[0]
 
         outline = [pe.Stroke(linewidth=2.2, foreground="black"), pe.Normal()]
         line_unc.set_path_effects(outline)
         line_cal.set_path_effects(outline)
-
-
-
 
     _style_cart_axis(axC)
     axC.set_xlabel(panel_c_xlabel)
@@ -294,9 +327,9 @@ def make_figure(
 
     # --- headings (aligned) ---
     bbA, bbB, bbC = axA.get_position(), axB.get_position(), axC.get_position()
-    y_head = 0.96
-    fig.text(bbA.x0, y_head, r"$\mathbf{(A)}$ Uncalibrated phase error", ha="left", va="top")
-    fig.text(bbB.x0, y_head, r"$\mathbf{(B)}$ Calibrated phase error", ha="left", va="top")
+    y_head = 0.92
+    fig.text(bbA.x0, y_head, r"$\mathbf{a}$ ecHT phase error", ha="left", va="top")
+    fig.text(bbB.x0, y_head, r"$\mathbf{b}$ cecHT phase error", ha="left", va="top")
     fig.text(bbC.x0 - 0.02, y_head, panel_c_title, ha="left", va="top")
 
     bbA, bbB, bbC = axA.get_position(), axB.get_position(), axC.get_position()
@@ -315,8 +348,8 @@ def make_figure(
 
     fig.text(
         (x1 + x2) / 2,
-        y - h + 0.05,
-        rf"({p_txt}, circular permutation)",
+        y - h + 0.04,
+        rf"{p_txt}",
         ha="center",
         va="bottom",
         fontsize=7,
