@@ -29,6 +29,43 @@ cd repo-name
 pip install -r requirements.txt
 ```
 
+### Using (c)ecHT in your own script
+Minimal working example
+
+```bash
+import numpy as np
+from phase import ECHT
+
+# Parameters
+duration = 1           # Duration of recording (s)
+N = 128                # number of samples in a window
+fs = 256               # sampling rate (Hz)
+l_freq, h_freq = 8, 13 # low- & highpass filter cutoff (Hz)
+filt_order = 1         # order of bandpass filter
+cal = True             # optional calibration
+f0 = 10                # Frequency of signal (Hz), required for calibration
+
+# Signal
+t = np.arange(int(fs * duration)) / fs
+x = np.cos(2 * np.pi * f0 * t)
+
+echt = ECHT(
+    l_freq=l_freq, h_freq=h_freq, sfreq=fs, filt_order=filt_order,
+    calibrate=cal, f0=f0
+)
+# Initialize
+n_out = len(x) - (N - 1)
+z = np.empty(n_out, dtype=complex)
+
+# Fit once
+echt.fit(x[:N])
+
+# Online transform
+for k, end_idx in enumerate(range(N - 1, len(x))):
+    seg = x[end_idx - N + 1:end_idx + 1]
+    z[k] = echt.transform(seg).ravel()[0]
+```
+
 ---
 
 ## 🔬 Experiments
