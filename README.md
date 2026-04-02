@@ -86,8 +86,8 @@ python simulations/latency.py
 How does ecHT and cecHT perform on real EEG data based on the HMC dataset.
 
 ```python
-python HMC/eeg_phase.py
-python HMC/eeg_plot.py
+python EEG/eeg_phase.py
+python EEG/eeg_plot.py
 ```
 
 ### Experiment 3: Tremor data
@@ -104,9 +104,10 @@ python tremor/tremor_echt.py --track
 
 ## 📈 Datasets
 
-We investigated the performance of ecHT and c-ecHT on two types of data. EEG data based on the HMC dataset and tremor
-data based on Schregelmann et al. (2021). Download the datasets at the link below.
+We investigated the performance of ecHT and c-ecHT on multiple types of data. EEG data based on the EEG Alpha Waves and HMC dataset and tremor
+data based on Schregelmann et al. (2021). Download the datasets at the link below and acknowledge the original authors in your work.
 
+- [EEG Alpha Waves Dataset](https://doi.org/10.5281/zenodo.2348891)
 - [Haaglanden Medisch Centrum sleep staging database](https://doi.org/10.13026/t4w7-3k21)
 - [Replication Data for: Non-invasive Suppression of Essential Tremor via Phase-Locked Disruption of its Temporal Coherence](https://doi.org/10.7910/DVN/Z6EN2I)
 
@@ -115,9 +116,10 @@ data based on Schregelmann et al. (2021). Download the datasets at the link belo
 ## 📁 Repository Structure
 
 ```
-├── HMC/                            # EEG experiments
+├── EEG/                            # EEG experiments
 │   ├── eeg_phase.py                # Phase estimation on EEG data
-│   └── eeg_plot.py/                # Plot of eeg_phase.py
+│   ├── eeg_plot.py/                # Plot of eeg_phase.py
+│   └── helpers.py/                 # Helper scripts for eeg_phase.py
 ├── simulations/                    # Ideal experiments
 │   ├── harmonic_experiments.py     # Parameter sweeps 
 │   ├── intro_diagram.py            # Fig. 1 of paper
