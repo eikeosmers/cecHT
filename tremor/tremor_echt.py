@@ -18,10 +18,7 @@ from scipy.signal import hilbert, butter, sosfiltfilt, sosfilt, sosfilt_zi, welc
 from joblib import Parallel, delayed
 
 from phase_track import ECHT
-from utils import (
-    _wrap_phase,
-    make_figure
-)
+from utils import _wrap_phase, make_figure, run_echt_window_loop
 
 
 # Helpers
@@ -152,45 +149,28 @@ def process_one_trial(
     if out_len <= 0:
         return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
 
-    err_unc = np.empty(out_len, dtype=float)
-    err_cal = np.empty(out_len, dtype=float)
-
-    f0_track = f0
-    alpha = 1
-    last_f0_hat = np.nan
-
-    k = 0
-    for end_idx in range(N - 1, L):
-        # ecHT window
-        start_idx = end_idx - N + 1
-        seg_echt = x[start_idx:end_idx + 1]  # length N
-
-        # f0 tracking buffer
-        if track_f0:
-            # Update only every freq_stride samples to reduce compute
+    # Build per-sample f0 sequence (for tracking mode) or use None (static)
+    if track_f0:
+        f0_seq = np.full(L, f0, dtype=float)
+        f0_track = f0
+        last_f0_hat = np.nan
+        f_min = max(0.1, f0 - 0.5 * f0)
+        f_max = min(0.5 * fs - 0.1, f0 + 0.5 * f0)
+        for end_idx in range(N - 1, L):
             if ((end_idx - (N - 1)) % freq_stride) == 0:
                 start_f0 = max(0, end_idx - freq_win_len + 1)
-                seg_f0 = x_filt_online[start_f0:end_idx + 1]
-
-                # Track in a band around the baseline
-                f_min = max(0.1, f0 - 0.5*f0)
-                f_max = min(0.5*fs - 0.1, f0 + 0.5*f0)
-
-                last_f0_hat = _estimate_f0(seg_f0, fs, f_min, f_max)
-
+                last_f0_hat = _estimate_f0(
+                    x_filt_online[start_f0:end_idx + 1], fs, f_min, f_max
+                )
             if np.isfinite(last_f0_hat):
-                f0_track = (1 - alpha)*f0_track + alpha * last_f0_hat
+                f0_track = last_f0_hat
+            f0_seq[end_idx] = f0_track
+    else:
+        f0_seq = None
 
-        zu = np.squeeze(echt_unc.transform(seg_echt, f0=f0_track))
-        zc = np.squeeze(echt_cal.transform(seg_echt, f0=f0_track))
-
-        phi_unc_end = np.angle(zu[-1])
-        phi_cal_end = np.angle(zc[-1])
-        phi_true_end = phi_offline[end_idx]
-
-        err_unc[k] = _wrap_phase(phi_unc_end - phi_true_end)
-        err_cal[k] = _wrap_phase(phi_cal_end - phi_true_end)
-        k += 1
+    err_unc, err_cal = run_echt_window_loop(
+        x, phi_offline, echt_unc, echt_cal, N, f0_seq=f0_seq
+    )
 
     trial_abs_unc = np.mean(np.abs(err_unc))
     trial_abs_cal = np.mean(np.abs(err_cal))
@@ -346,7 +326,6 @@ def main():
     process_fn = process_one_trial
     if not track_f0:
         process_fn = partial(process_one_trial, track_f0=False)
-
     (
         err_unc, err_cal,
         trial_freq_cv,
