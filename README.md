@@ -15,7 +15,7 @@ TU Berlin
 
 ```bash
 - Python 3.12+ (but other versions probably work)
- joblib, matplotlib, mne, numpy, pandas, philistine, scipy, tqdm
+ fooof, joblib, matplotlib, mne, numpy, pandas, philistine, scipy, tqdm
 ```
 
 ### Installation
