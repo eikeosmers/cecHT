@@ -18,7 +18,7 @@ import mne
 import numpy as np
 from scipy import stats
 from scipy.optimize import curve_fit
-from scipy.signal import argrelmin, butter, hilbert, savgol_filter, sosfiltfilt
+from scipy.signal import butter, hilbert, savgol_filter, sosfiltfilt
 
 from phase import ECHT
 from utils import _circ_stats, run_echt_window_loop
@@ -102,14 +102,12 @@ def _bic_peak_test(residual, freqs, fmin, fmax):
     return (bic_h0 - bic_h1) > 0, bic_h0 - bic_h1
 
 
-def savgol_iaf(
+def iaf(
     raw,
     picks=None,
     fmin=None,
     fmax=None,
     resolution=0.25,
-    window_length=11,
-    polyorder=5,
     pink_max_r2=0.9,
 ):
     """Estimate IAF with FOOOF aperiodic removal and BIC peak validation.
@@ -120,11 +118,10 @@ def savgol_iaf(
     picks
     fmin, fmax:                Alpha-band edges (Hz).  Auto-detected when None.
     resolution:                Welch frequency resolution (Hz).
-    window_length, polyorder:  Savgol smoothing parameters for the final peak-picking step.
     pink_max_r2:               Spectra with log-log R² above this are treated as pure 1/f.
 
     """
-    freq_range = [1, 30]
+    freq_range = [0.1, 30]
     n_fft = int(raw.info["sfreq"] / resolution)
     w_spec = raw.compute_psd(method="welch", picks=picks, n_fft=n_fft,
                              fmin=freq_range[0], fmax=freq_range[1])
@@ -135,7 +132,6 @@ def savgol_iaf(
     residual = np.log10(psd) - _fooof_aperiodic_log10(fm, freqs)
     psd_flat = np.power(10, residual)
 
-    psd_smooth = savgol_filter(psd_flat, window_length=window_length, polyorder=polyorder)
     alpha_mask = (freqs >= fmin) & (freqs <= fmax)
 
     _, _, r, _, _ = stats.linregress(np.log10(freqs), np.log10(psd))
@@ -146,8 +142,8 @@ def savgol_iaf(
     if pink_r2 > pink_max_r2 or not peak_sig:
         paf, cog = None, None
     else:
-        paf = freqs[alpha_mask][np.argmax(psd_smooth[alpha_mask])]
-        alpha_weights = psd_smooth[alpha_mask]
+        paf = freqs[alpha_mask][np.argmax(psd_flat[alpha_mask])]
+        alpha_weights = psd_flat[alpha_mask]
         cog = (float(np.average(freqs[alpha_mask], weights=alpha_weights))
                if np.any(alpha_weights > 0) else None)
         if cog is None:
@@ -176,14 +172,13 @@ def estimate_paf(data, info, fmin=7.5, fmax=14,
     pafs = []
     for tmin in np.arange(0, duration - segment_duration, step):
         seg = raw_tmp.copy().crop(tmin=tmin, tmax=tmin + segment_duration)
-        res = savgol_iaf(seg, fmin=fmin, fmax=fmax,
-                         pink_max_r2=0.5, window_length=21,
+        res = iaf(seg, fmin=fmin, fmax=fmax,
+                         pink_max_r2=0.9, window_length=21,
                          polyorder=polyorder, resolution=0.17)
         if res.PeakAlphaFrequency is not None and res.PeakAlphaFrequency > 0:
             pafs.append(res.PeakAlphaFrequency)
 
     return float(np.median(pafs)) if pafs else None
-
 
 # ecHT parameter derivation
 def params_from_f0(fs, f0, bw_factor=0.5):
@@ -263,9 +258,16 @@ def get_first_stage_change_end(annot):
              else annot[-1]["onset"] + annot[-1].get("duration", 0))
     return t_start, t_end
 
+def load_hmc(edf_dir, channel_name="EEG O2-M1", window_dur=30, step_dur=15):
+    """Load HMC dataset: Split the first Wake segment into multiple windows.
 
-def load_hmc(edf_dir, channel_name="EEG O2-M1"):
-    """Load HMC dataset: crop each EDF to the first Wake segment. """
+    Parameters
+    ----------
+    window_dur : float
+        Duration of each sub-segment in seconds.
+    step_dur : float
+        Step size between windows in seconds.
+    """
     edf_dir = Path(edf_dir)
     edf_files = sorted(
         p for p in edf_dir.glob("*.edf")
@@ -281,41 +283,54 @@ def load_hmc(edf_dir, channel_name="EEG O2-M1"):
             continue
         try:
             ann = mne.read_annotations(scoring_path)
-            if not ann:
-                continue
+            if not ann: continue
             t_start, t_end = get_first_stage_change_end(ann)
 
             raw = mne.io.read_raw_edf(str(edf_path), preload=True)
-            if channel_name not in raw.ch_names:
-                print(f"  Skipping {edf_path.name}: channel {channel_name!r} not found")
-                continue
+            if channel_name not in raw.ch_names: continue
 
             t_start = max(0, t_start)
             t_end = min(t_end, raw.times[-1])
-            if t_end <= t_start:
-                continue
 
-            raw_c = raw.copy().pick([channel_name]).crop(tmin=t_start, tmax=t_end)
-            raw_c.load_data()
-            data = raw_c.get_data().squeeze()
+            # Crop the continuous data once to the Wake period
+            raw_wake = raw.copy().pick([channel_name]).crop(tmin=t_start, tmax=t_end)
+            full_data = raw_wake.get_data().squeeze()
+            fs = float(raw_wake.info["sfreq"])
+            full_info = raw_wake.info.copy()
 
-            # For HMC, "full_data" is the cropped wake segment itself.
-            segments.append(dict(
-                subject=edf_path.stem,
-                condition="Wake",
-                block_idx=0,
-                channel=channel_name,
-                duration=raw_c.times[-1],
-                full_data=data,
-                full_info=raw_c.info.copy(),
-                fs=float(raw_c.info["sfreq"]),
-                sample_start=0,
-                sample_end=data.size,
-            ))
+            # Break the Wake period into windows
+            total_dur = full_data.size / fs
+            current_t = 0
+            block_idx = 0
+
+            while current_t + window_dur <= total_dur:
+                s0 = int(round(current_t * fs))
+                s1 = int(round((current_t + window_dur) * fs))
+
+                # Ensure we don't exceed array bounds
+                s1 = min(s1, full_data.size)
+                if (s1 - s0) < 10: break  # Skip tiny fragments
+
+                segments.append(dict(
+                    subject=edf_path.stem,
+                    condition="Wake",
+                    block_idx=block_idx,
+                    channel=channel_name,
+                    duration=window_dur,
+                    full_data=full_data,
+                    full_info=full_info,
+                    fs=fs,
+                    sample_start=s0,
+                    sample_end=s1,
+                ))
+
+                current_t += step_dur
+                block_idx += 1
+
         except Exception as e:
             print(f"  Skipping {edf_path.name}: {e}")
 
-    print(f"Loaded {len(segments)} segments from HMC ({edf_dir})")
+    print(f"Loaded {len(segments)} windows from HMC ({edf_dir})")
     return segments
 
 
