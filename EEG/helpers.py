@@ -6,7 +6,6 @@ Contains:
 - Acausal reference analytic signal
 - ecHT vs Hilbert phase-error computation
 - Dataset-specific loaders (HMC, Rodrigues2017)
-- Result aggregation and I/O
 """
 
 import csv
@@ -28,7 +27,7 @@ from utils import _circ_stats, run_echt_window_loop
 IafResult = namedtuple(
     "IafResult",
     ["PeakAlphaFrequency", "CenterOfGravity", "AlphaBand",
-     "delta_bic", "pink_r2", "band_auto_detected"],
+     "delta_bic", "pink_r2"],
 )
 
 _DEFAULT_FMIN = 7.5
@@ -37,13 +36,13 @@ _EDGE_SEARCH_SG_WINDOW = 11
 _EDGE_SEARCH_SG_POLY = 3
 
 
-def _fit_fooof(freqs, psd, freq_range=(1.0, 30.0)):
+def _fit_fooof(freqs, psd, freq_range=(1, 30)):
     """Fit a FOOOF model (fixed aperiodic, no knee)."""
     fm = FOOOF(
-        peak_width_limits=(1.0, 8.0),
+        peak_width_limits=(1, 8),
         max_n_peaks=6,
-        min_peak_height=0.0,
-        peak_threshold=2.0,
+        min_peak_height=0,
+        peak_threshold=2,
         aperiodic_mode="fixed",
         verbose=False,
     )
@@ -67,19 +66,14 @@ def _bic_peak_test(residual, freqs, fmin, fmax):
 
     Parameters
     ----------
-    residual : 1-D array
-        log10(PSD) - aperiodic fit (the full broadband flattened spectrum).
-    freqs : 1-D array
-        Corresponding frequency vector (Hz).
-    fmin, fmax : float
-        Alpha-band edges (Hz).
+    residual        log10(PSD) - aperiodic fit (the full broadband flattened spectrum).
+    freqs:          Corresponding frequency vector (Hz).
+    fmin, fmax:     Alpha-band edges (Hz).
 
     Returns
     -------
-    significant : bool
-        True if the peak model is preferred over flat by BIC.
-    delta_bic : float
-        BIC(H0) - BIC(H1).  Positive -> peak model wins.
+    significant:     True if the peak model is preferred over flat by BIC.
+    delta_bic        BIC(H0) - BIC(H1).  Positive -> peak model wins.
     """
     fit_mask = (freqs >= fmin) & (freqs <= fmax)
     fit_freqs = freqs[fit_mask]
@@ -87,7 +81,7 @@ def _bic_peak_test(residual, freqs, fmin, fmax):
     n = len(fit_resid)
 
     if n < 4:
-        return False, 0.0
+        return False, 0
 
     ss_h0 = np.sum(fit_resid ** 2)
     peak_idx = np.argmax(fit_resid)
@@ -98,7 +92,7 @@ def _bic_peak_test(residual, freqs, fmin, fmax):
     popt, _ = curve_fit(
         _gaussian_peak, fit_freqs, fit_resid,
         p0=[amp_guess, center_guess, width_guess],
-        bounds=([0.0, fmin, 0.25], [np.inf, fmax, fmax - fmin]),
+        bounds=([0, fmin, 0.25], [np.inf, fmax, fmax - fmin]),
         maxfev=10_000,
     )
 
@@ -106,35 +100,6 @@ def _bic_peak_test(residual, freqs, fmin, fmax):
     bic_h0 = n * np.log(ss_h0 / n)
     bic_h1 = n * np.log(max(ss_h1, 1e-30) / n) + 3 * np.log(n)
     return (bic_h0 - bic_h1) > 0, bic_h0 - bic_h1
-
-
-def _auto_detect_edges(freqs, psd_flat, fmin_hint, fmax_hint):
-    """Find alpha-band edges from local minima of the FOOOF-flattened PSD."""
-    fmin_b = fmin_hint if fmin_hint is not None else 5.0
-    fmax_b = fmax_hint if fmax_hint is not None else 15.0
-
-    search = (freqs >= fmin_b) & (freqs <= fmax_b)
-    f_s = freqs[search]
-    p_s = psd_flat[search]
-
-    wl = min(_EDGE_SEARCH_SG_WINDOW, len(p_s))
-    if wl > _EDGE_SEARCH_SG_POLY and len(p_s) >= wl:
-        p_s = savgol_filter(p_s, window_length=wl, polyorder=_EDGE_SEARCH_SG_POLY)
-
-    fmin_out = fmin_hint
-    fmax_out = fmax_hint
-
-    if fmin_out is None:
-        low_mask = f_s < 10
-        mins = argrelmin(p_s[low_mask])[0]
-        fmin_out = f_s[low_mask][mins[-1]] if mins.size > 0 else _DEFAULT_FMIN
-
-    if fmax_out is None:
-        high_mask = f_s > 10
-        mins = argrelmin(p_s[high_mask])[0]
-        fmax_out = f_s[high_mask][mins[0]] if mins.size > 0 else _DEFAULT_FMAX
-
-    return fmin_out, fmax_out, fmin_hint is None or fmax_hint is None
 
 
 def savgol_iaf(
@@ -151,22 +116,15 @@ def savgol_iaf(
 
     Parameters
     ----------
-    raw : mne.io.Raw
-    picks : array-like | None
-    fmin, fmax : float | None
-        Alpha-band edges (Hz).  Auto-detected when None.
-    resolution : float
-        Welch frequency resolution (Hz).
-    window_length, polyorder : int
-        Savgol smoothing parameters for the final peak-picking step.
-    pink_max_r2 : float
-        Spectra with log-log R² above this are treated as pure 1/f.
+    raw
+    picks
+    fmin, fmax:                Alpha-band edges (Hz).  Auto-detected when None.
+    resolution:                Welch frequency resolution (Hz).
+    window_length, polyorder:  Savgol smoothing parameters for the final peak-picking step.
+    pink_max_r2:               Spectra with log-log R² above this are treated as pure 1/f.
 
-    Returns
-    -------
-    IafResult
     """
-    freq_range = [1.0, 30.0]
+    freq_range = [1, 30]
     n_fft = int(raw.info["sfreq"] / resolution)
     w_spec = raw.compute_psd(method="welch", picks=picks, n_fft=n_fft,
                              fmin=freq_range[0], fmax=freq_range[1])
@@ -177,7 +135,6 @@ def savgol_iaf(
     residual = np.log10(psd) - _fooof_aperiodic_log10(fm, freqs)
     psd_flat = np.power(10, residual)
 
-    fmin, fmax, band_auto = _auto_detect_edges(freqs, psd_flat, fmin, fmax)
     psd_smooth = savgol_filter(psd_flat, window_length=window_length, polyorder=polyorder)
     alpha_mask = (freqs >= fmin) & (freqs <= fmax)
 
@@ -196,31 +153,23 @@ def savgol_iaf(
         if cog is None:
             paf = None
 
-    return IafResult(paf, cog, (fmin, fmax), delta_bic, pink_r2, band_auto)
+    return IafResult(paf, cog, (fmin, fmax), delta_bic, pink_r2)
 
 
-def estimate_paf(data_1d, info, fmin=7.5, fmax=14,
-                 segment_duration=6.0, polyorder=5, step=0.15):
+def estimate_paf(data, info, fmin=7.5, fmax=14,
+                 segment_duration=6, polyorder=5, step=0.15):
     """Estimate PAF as the median across sliding Savgol-IAF windows.
 
     Parameters
     ----------
-    data_1d : 1-D array
-    info : mne.Info
-    fmin, fmax : float
-        Alpha-band search edges (Hz).
-    segment_duration : float
-        Duration of each sub-window (s).
-    polyorder : int
-        Savgol polynomial order.
-    step : float
-        Sliding step size (s).
-
-    Returns
-    -------
-    float | None
+    data
+    info
+    fmin, fmax:         Alpha-band search edges (Hz).
+    segment_duration:   Duration of each sub-window (s).
+    polyorder:          Savgol polynomial order.
+    step:               Sliding step size (s).
     """
-    raw_tmp = mne.io.RawArray(data_1d[np.newaxis, :], info)
+    raw_tmp = mne.io.RawArray(data[np.newaxis, :], info)
     duration = raw_tmp.times[-1]
     segment_duration = min(duration, segment_duration)
 
@@ -236,23 +185,16 @@ def estimate_paf(data_1d, info, fmin=7.5, fmax=14,
     return float(np.median(pafs)) if pafs else None
 
 
-
 # ecHT parameter derivation
 def params_from_f0(fs, f0, bw_factor=0.5):
     """Derive ecHT window length and band-pass edges from centre frequency.
 
     Parameters
     ----------
-    fs : float
-    f0 : float
-        Centre frequency (Hz).
-    bw_factor : float
-        Band = f0 ± (bw_factor * f0) / 2.
+    fs:        Sampling frequency
+    f0:        Centre frequency (Hz).
+    bw_factor: Band = f0 ± (bw_factor * f0) / 2.
 
-    Returns
-    -------
-    win_len : int
-    l_freq, h_freq : float
     """
     win_len = int(round(0.512 * fs))   # Bressler et al. (2023): 128 samples @ 250 Hz
     bw = bw_factor * f0
@@ -261,27 +203,26 @@ def params_from_f0(fs, f0, bw_factor=0.5):
     return win_len, l_freq, h_freq
 
 
-def echt_vs_hilbert(data_1d, fs, filt_order, f0, l_freq, h_freq, win_len,
+def echt_vs_hilbert(data, fs, filt_order, f0, l_freq, h_freq, win_len,
                     ref_analytic_signal):
     """Run ecHT online (uncalibrated + calibrated) and return phase errors (deg).
 
     Parameters
     ----------
-    data_1d : 1-D array
-    fs : float
-    filt_order : int
-    f0 : float
-        Centre frequency for calibrated ecHT.
-    l_freq, h_freq : float
-    win_len : int
-    ref_analytic_signal : 1-D complex array | None
+    data
+    fs:         sampling frequency
+    filt_order
+    f0:         Centre frequency for calibrated ecHT.
+    l_freq, h_freq
+    win_len
+    ref_analytic_signal
         Pre-computed acausal reference.  Computed internally when None.
 
     Returns
     -------
-    phase_err_unc_deg, phase_err_cal_deg : 1-D arrays
+    phase_err_unc_deg, phase_err_cal_deg
     """
-    n = data_1d.size
+    n = data.size
     if win_len < 3 or win_len >= n:
         raise ValueError(f"invalid window length (win_len={win_len}, N={n})")
 
@@ -289,12 +230,12 @@ def echt_vs_hilbert(data_1d, fs, filt_order, f0, l_freq, h_freq, win_len,
                     filt_order=filt_order, calibrate=False)
     echt_cal = ECHT(l_freq=l_freq, h_freq=h_freq, sfreq=fs,
                     filt_order=filt_order, f0=f0, calibrate=True)
-    echt_unc.fit(data_1d[:win_len])
-    echt_cal.fit(data_1d[:win_len])
+    echt_unc.fit(data[:win_len])
+    echt_cal.fit(data[:win_len])
 
     ref_phase = np.angle(ref_analytic_signal)
     err_unc, err_cal = run_echt_window_loop(
-        data_1d, ref_phase, echt_unc, echt_cal, win_len
+        data, ref_phase, echt_unc, echt_cal, win_len
     )
     return np.degrees(err_unc), np.degrees(err_cal)
 
@@ -323,29 +264,14 @@ def get_first_stage_change_end(annot):
     return t_start, t_end
 
 
-def load_hmc(edf_dir, max_subjects=None, channel_name="EEG O2-M1"):
-    """Load HMC dataset: crop each EDF to the first Wake segment.
-
-    Parameters
-    ----------
-    edf_dir : str | Path
-    max_subjects : int | None
-    channel_name : str
-
-    Returns
-    -------
-    segments : list[dict]
-        Each dict has: subject, condition, block_idx, channel, duration,
-        full_data, full_info, fs, sample_start, sample_end.
-    """
+def load_hmc(edf_dir, channel_name="EEG O2-M1"):
+    """Load HMC dataset: crop each EDF to the first Wake segment. """
     edf_dir = Path(edf_dir)
     edf_files = sorted(
         p for p in edf_dir.glob("*.edf")
         if not p.name.endswith("_sleepscoring.edf")
         and not any(subj in p.name for subj in HMC_EXCLUDE_SUBJECTS)
     )
-    if max_subjects is not None:
-        edf_files = edf_files[:max_subjects]
 
     segments = []
     for edf_path in edf_files:
@@ -393,7 +319,7 @@ def load_hmc(edf_dir, max_subjects=None, channel_name="EEG O2-M1"):
     return segments
 
 
-def load_rodrigues2017(max_subjects=None, conditions=None, channel_name=None):
+def load_rodrigues2017(conditions=None, channel_name=None):
     """Load Rodrigues2017 and extract individual EC / EO blocks.
 
     Each dict carries the full continuous recording (full_data) and
@@ -402,15 +328,9 @@ def load_rodrigues2017(max_subjects=None, conditions=None, channel_name=None):
 
     Parameters
     ----------
-    max_subjects : int | None
-    conditions : list[str] | None
-        Filter by "EC" / "EO".
-    channel_name : list[str] | None
-        Preferred channels, in priority order.  Defaults to ["Oz"].
+    conditions:          Filter by "EC" / "EO".
+    channel_name:        Preferred channels, in priority order.  Defaults to ["Oz"].
 
-    Returns
-    -------
-    segments : list[dict]
     """
     if channel_name is None:
         channel_name = ["Oz"]
@@ -419,8 +339,6 @@ def load_rodrigues2017(max_subjects=None, conditions=None, channel_name=None):
 
     dataset = Rodrigues2017()
     subjects = dataset.subject_list
-    if max_subjects is not None:
-        subjects = subjects[:max_subjects]
 
     segments = []
     for subj in subjects:
@@ -457,7 +375,7 @@ def load_rodrigues2017(max_subjects=None, conditions=None, channel_name=None):
                         continue
 
                     tmax = min(onset + dur, raw_pick.times[-1])
-                    if tmax - onset < 2.0:
+                    if tmax - onset < 2:
                         continue
 
                     s0 = int(round(onset * fs))
@@ -487,23 +405,16 @@ def _fail(seg_id, reason):
                 phase_err_unc=None, phase_err_cal=None, iaf_segments=[])
 
 
-def process_segment(seg, iaf_window=10.0, bw_factor=0.5, filt_order=1):
+def process_segment(seg, iaf_window=10, bw_factor=0.5, filt_order=1):
     """Estimate IAF (offline) and compute phase errors for one segment.
 
     Parameters
     ----------
-    seg : dict
-        As returned by load_hmc / load_rodrigues2017.
-    iaf_window : float
-        Duration (s) of the initial IAF estimation window.  <=0 -> full segment.
-    bw_factor : float
-        Bandwidth factor: band = f0 ± bw_factor*f0/2.
-    filt_order : int
-        Butterworth order for ecHT and the acausal reference.
+    seg:               As returned by load_hmc / load_rodrigues2017.
+    iaf_window:        Duration (s) of the initial IAF estimation window.  <=0 -> full segment.
+    bw_factor:         Bandwidth factor: band = f0 ± bw_factor*f0/2.
+    filt_order:        Butterworth order for ecHT and the acausal reference.
 
-    Returns
-    -------
-    dict  (keys: seg_id, ok, reason, phase_err_unc, phase_err_cal, iaf_segments)
     """
     mne.set_log_level("ERROR")
     sid = f"s{seg['subject']}_{seg.get('condition', '')}_b{seg.get('block_idx', 0)}"
@@ -556,13 +467,6 @@ def process_segment(seg, iaf_window=10.0, bw_factor=0.5, filt_order=1):
 # Result aggregation and I/O
 def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
     """Aggregate per-segment results, print summary, and write output files.
-
-    Parameters
-    ----------
-    results : list[dict]
-    csv_path : str
-    npz_path : str
-    iaf_csv_path : str
     """
     all_unc, all_cal = [], []
     per_file_rows, iaf_rows = [], []
