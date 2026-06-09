@@ -50,8 +50,8 @@ def compute_iaf_cv_per_file(iaf_csv: str):
     if df_valid.empty:
         raise RuntimeError("No valid segments with alpha found")
 
-    # Extract participant ID into a NEW column
-    df_valid["participant"] = df_valid["file"].str.extract(r"(s\d+)", expand=False)
+    # Extract participant ID
+    df_valid["participant"] = df_valid["file"].str.extract(r"^s?([a-zA-Z0-9]+)_", expand=False)
 
     stats = (
         df_valid
@@ -70,7 +70,6 @@ def compute_iaf_cv_per_file(iaf_csv: str):
     return stats
 
 
-# Plotting
 def plot_phase_error(
     phase_err_unc_deg_all,
     phase_err_cal_deg_all,
@@ -78,95 +77,55 @@ def plot_phase_error(
     iaf_csv_path=IAF_CSV,
     save_base="phase_error_rod17",
 ):
-    """
-    Three-panel figure:
-      (A) Uncalibrated phase-error distribution (polar)
-      (B) Calibrated phase-error distribution (polar)
-      (C) Mean phase error (uncalibrated & calibrated) vs IAF CV per recording,
-          with paired points and regression lines, styled like the phase panels.
-    """
-    # ------------------------------------------------------------
-    # Data for panels A & B (all samples)
-    # ------------------------------------------------------------
-    phase_err_unc_deg_all = np.asarray(phase_err_unc_deg_all)
-    phase_err_cal_deg_all = np.asarray(phase_err_cal_deg_all)
+    # Data for panels A & B (Raw samples)
+    phase_err_unc_rad = np.radians(np.asarray(phase_err_unc_deg_all))
+    phase_err_cal_rad = np.radians(np.asarray(phase_err_cal_deg_all))
 
-    phase_err_unc_rad = np.radians(phase_err_unc_deg_all)
-    phase_err_cal_rad = np.radians(phase_err_cal_deg_all)
-
-    # For the significance annotation between panels A & B
-    phase_df_for_perm = pd.read_csv(phase_csv_path)
-
-    # per-file circular mean directions (in radians)
-    if "mean_unc_deg" not in phase_df_for_perm.columns or "mean_cal_deg" not in phase_df_for_perm.columns:
-        raise KeyError(
-            "phase_error_per_file.csv must contain columns 'mean_unc_deg' and 'mean_cal_deg' "
-            "to run the paired circular permutation test."
-        )
-    trial_mu_unc = np.radians(phase_df_for_perm["mean_unc_deg"].to_numpy(dtype=float))
-    trial_mu_cal = np.radians(phase_df_for_perm["mean_cal_deg"].to_numpy(dtype=float))
-
-    # weights: try a few common column names; fall back to equal weights
-    weight_candidates = [
-        "n_windows",
-        "n_win",
-        "n_samples",
-        "n_segments",
-        "n",
-        "count",
-    ]
-    w_col = next((c for c in weight_candidates if c in phase_df_for_perm.columns), None)
-    if w_col is None:
-        trial_nwin = np.ones_like(trial_mu_unc, dtype=float)
-    else:
-        trial_nwin = phase_df_for_perm[w_col].to_numpy(dtype=float)
-
-
-    # ------------------------------------------------------------
-    # Data for panel C: per-file mean errors vs IAF CV
-    # ------------------------------------------------------------
+    # Data for Panel C AND Significance Test (Aggregated to Subject)
     phase_df = pd.read_csv(phase_csv_path)
-
     iaf_stats = compute_iaf_cv_per_file(iaf_csv_path)
-    # Merge to CV
-    # HMC/SDEF
-    # merged = phase_df.merge(
-    #     iaf_stats[["cv_iaf", "mean_iaf_hz", "std_iaf_hz", "n_segments"]],
-    #     on="file",
-    #     how="left",
-    # )
 
-    # Rodrigues2017
-    phase_df["file"] = phase_df["file"].str.extract(r"(s\d+)", expand=False)
-    merged = phase_df.merge(iaf_stats, on="file", how="left")
+    # Extract Participant ID from segment filenames
+    phase_df["participant"] = phase_df["file"].str.extract(r"^s?([a-zA-Z0-9]+)_", expand=False)
+
+    phase_subject = phase_df.groupby("participant").agg({
+        "mean_unc_deg": "mean",
+        "mean_cal_deg": "mean",
+        "n_samples": "sum" 
+    }).reset_index()
+
+    # Prepare variables for the Significance Test
+    trial_mu_unc = np.radians(phase_subject["mean_unc_deg"].to_numpy(dtype=float))
+    trial_mu_cal = np.radians(phase_subject["mean_cal_deg"].to_numpy(dtype=float))
+    trial_nwin = phase_subject["n_samples"].to_numpy(dtype=float)
+
+    # merge the subject-level phase data with the subject-level IAF stats
+    merged = phase_subject.merge(iaf_stats, left_on="participant", right_on="file", how="left")
 
     if merged.empty:
-        raise RuntimeError(
-            "No overlapping recordings between phase_error_per_file.csv "
-            "and iaf_per_segment.csv after merging on 'file'."
-        )
+        raise RuntimeError("No overlapping recordings after aggregating to subject level.")
 
     x_cv = merged["cv_iaf"].values
     y_unc = merged["mean_unc_deg"].values
     y_cal = merged["mean_cal_deg"].values
 
-
-    # Plot
     make_figure(
-        err_unc_rad=phase_err_unc_rad,
-        err_cal_rad=phase_err_cal_rad,
-        trial_freq_cv=x_cv,
-        trial_abs_unc_rad=np.radians(y_unc),
-        trial_abs_cal_rad=np.radians(y_cal),
-        trial_mu_unc=trial_mu_unc,
-        trial_mu_cal=trial_mu_cal,
-        trial_nwin=trial_nwin,
+        err_unc_rad=phase_err_unc_rad,      # All samples (for histograms)
+        err_cal_rad=phase_err_cal_rad,      # All samples (for histograms)
+        trial_freq_cv=x_cv,                 # Per-subject (for Panel C)
+        trial_abs_unc_rad=np.radians(y_unc), # Per-subject (for Panel C)
+        trial_abs_cal_rad=np.radians(y_cal), # Per-subject (for Panel C)
+        trial_mu_unc=trial_mu_unc,          # Per-subject (for Significance Test)
+        trial_mu_cal=trial_mu_cal,          # Per-subject (for Significance Test)
+        trial_nwin=trial_nwin,              # Per-subject (for Significance Test)
         save_base=save_base,
         n_perm=int(1e5),
         perm_seed=0,
         panel_c_xlabel="IAF CV",
         panel_c_title=r"$\mathbf{c}$ Phase error vs. IAF variability",
     )
+
+
 
 
 def main(npz_path=NPZ_PATH, phase_csv_path=PHASE_CSV, iaf_csv_path=IAF_CSV):
