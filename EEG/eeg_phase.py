@@ -45,7 +45,6 @@ _N_JOBS   = -1
 def main(
     dataset,
     iaf_window=10.0,
-    max_subjects=None,
     conditions=None,
     bw_factor=0.5,
     filt_order=1,
@@ -58,14 +57,13 @@ def main(
     if dataset == "hmc":
         if edf_dir is None:
             raise ValueError("--edf-dir is required for the HMC dataset")
-        kwargs = dict(edf_dir=edf_dir, max_subjects=max_subjects)
+        kwargs = dict(edf_dir=edf_dir)
         if channel_name is not None:
             kwargs["channel_name"] = channel_name
         segments = load_hmc(**kwargs)
 
     elif dataset == "rodrigues2017":
-        segments = load_rodrigues2017(max_subjects=max_subjects,
-                                      conditions=conditions)
+        segments = load_rodrigues2017(conditions=conditions)
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}")
 
@@ -93,6 +91,7 @@ if __name__ == "__main__":
 
     p.add_argument("--dataset", choices=["hmc", "rodrigues2017"],
                    default="rodrigues2017")
+                   # default = "hmc")
     p.add_argument("--iaf-window", type=float, default=10,
                    help="IAF estimation window (s). <=0 -> full segment. (default: 10)")
     p.add_argument("--subjects", type=int, default=None,
@@ -103,7 +102,7 @@ if __name__ == "__main__":
                    help="Bandwidth factor: f0 ± bw*f0/2 (default: 0.5).")
     p.add_argument("--filt-order", type=int, default=1,
                    help="Butterworth filter order (default: 1).")
-    p.add_argument("--edf-dir", type=str, default=None,
+    p.add_argument("--edf-dir", type=str, default="HMC/1.1/recordings",
                    help="Directory with EDF files (required for HMC).")
     p.add_argument("--channel", type=str, default=None,
                    help="EEG channel name (HMC only; default: 'EEG O2-M1').")
@@ -118,7 +117,6 @@ if __name__ == "__main__":
     main(
         dataset=args.dataset,
         iaf_window=args.iaf_window,
-        max_subjects=args.subjects,
         conditions=args.conditions,
         bw_factor=args.bw,
         filt_order=args.filt_order,
