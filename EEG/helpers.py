@@ -173,8 +173,7 @@ def estimate_paf(data, info, fmin=7.5, fmax=14,
     for tmin in np.arange(0, duration - segment_duration, step):
         seg = raw_tmp.copy().crop(tmin=tmin, tmax=tmin + segment_duration)
         res = iaf(seg, fmin=fmin, fmax=fmax,
-                         pink_max_r2=0.9, window_length=21,
-                         polyorder=polyorder, resolution=0.17)
+                         pink_max_r2=0.9, resolution=0.17)
         if res.PeakAlphaFrequency is not None and res.PeakAlphaFrequency > 0:
             pafs.append(res.PeakAlphaFrequency)
 
