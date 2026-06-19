@@ -58,65 +58,68 @@ def schreglmann(
     amp_err_cal = []
 
     for f in freqs:
-        x = np.cos(2 * np.pi * f * t)
+        num_phases = 180
+        for n in range(num_phases):
+            phi = 2 * np.pi * n / num_phases
+            x = np.cos(2 * np.pi * f * t + phi)
 
-        # True analytic endpoint for a unit-amplitude cosine:
-        phi_true_end = _wrap_phase(2 * np.pi * f * t_end)
+            # True analytic endpoint for a unit-amplitude cosine:
+            phi_true_end = _wrap_phase(2 * np.pi * f * t_end + phi)
 
-        # ecHT band-pass parameters according to Schreglmann et al.
-        BW = f / 2
-        l_freq = f - BW / 2
-        h_freq = f + BW / 2
+            # ecHT band-pass parameters according to Schreglmann et al.
+            BW = f / 2
+            l_freq = f - BW / 2
+            h_freq = f + BW / 2
 
-        # Uncalibrated ecHT
-        echt_uncal = ECHT(
-            l_freq=l_freq,
-            h_freq=h_freq,
-            sfreq=sfreq,
-            n_fft=n_samples,
-            filt_order=filt_order,
-            filter_type="butter",
-            calibrate=False,
-            f0=None,
-        )
-        z_uncal = echt_uncal.fit_transform(x).ravel()
-        z_end_uncal = z_uncal[-1]
-        phi_hat_uncal = np.angle(z_end_uncal)
-        amp_hat_uncal = np.abs(z_end_uncal)
+            # Uncalibrated ecHT
+            echt_uncal = ECHT(
+                l_freq=l_freq,
+                h_freq=h_freq,
+                sfreq=sfreq,
+                n_fft=n_samples,
+                filt_order=filt_order,
+                filter_type="butter",
+                calibrate=False,
+                f0=None,
+            )
+            z_uncal = echt_uncal.fit_transform(x).ravel()
+            z_end_uncal = z_uncal[-1]
+            phi_hat_uncal = np.angle(z_end_uncal)
+            amp_hat_uncal = np.abs(z_end_uncal)
 
-        # Endpoint phase error (deg)
-        err_phase_uncal = np.degrees(
-            abs(_wrap_phase(phi_hat_uncal - phi_true_end))
-        )
-        # Amplitude percentage error (%)
-        err_amp_uncal = 100 * abs(amp_hat_uncal - 1)
+            # Endpoint phase error (deg)
+            err_phase_uncal = np.degrees(
+                abs(_wrap_phase(phi_hat_uncal - phi_true_end))
+            )
+            # Amplitude percentage error (%)
+            err_amp_uncal = 100 * abs(amp_hat_uncal - 1)
 
-        phase_err_uncal.append(err_phase_uncal)
-        amp_err_uncal.append(err_amp_uncal)
+            phase_err_uncal.append(err_phase_uncal)
+            amp_err_uncal.append(err_amp_uncal)
 
-        # Calibrated ecHT
-        echt_cal = ECHT(
-            l_freq=l_freq,
-            h_freq=h_freq,
-            sfreq=sfreq,
-            n_fft=n_samples,
-            filt_order=filt_order,
-            filter_type="butter",
-            calibrate=True,
-            f0=f,
-        )
-        z_cal = echt_cal.fit_transform(x).ravel()
-        z_end_cal = z_cal[-1]
-        phi_hat_cal = np.angle(z_end_cal)
-        amp_hat_cal = np.abs(z_end_cal)
+            # Calibrated ecHT
+            echt_cal = ECHT(
+                l_freq=l_freq,
+                h_freq=h_freq,
+                sfreq=sfreq,
+                n_fft=n_samples,
+                filt_order=filt_order,
+                filter_type="butter",
+                calibrate=True,
+                f0=f,
+            )
+            z_cal = echt_cal.fit_transform(x).ravel()
+            z_end_cal = z_cal[-1]
+            phi_hat_cal = np.angle(z_end_cal)
+            amp_hat_cal = np.abs(z_end_cal)
 
-        err_phase_cal = np.degrees(
-            abs(_wrap_phase(phi_hat_cal - phi_true_end))
-        )
-        err_amp_cal = 100 * abs(amp_hat_cal - 1)
+            err_phase_cal = np.degrees(
+                abs(_wrap_phase(phi_hat_cal - phi_true_end))
+            )
+            err_amp_cal = 100 * abs(amp_hat_cal - 1)
 
-        phase_err_cal.append(err_phase_cal)
-        amp_err_cal.append(err_amp_cal)
+            phase_err_cal.append(err_phase_cal)
+            amp_err_cal.append(err_amp_cal)
 
     return (
         freqs,
