@@ -21,42 +21,29 @@ import os
 import numpy as np
 import matplotlib as mpl
 import matplotlib.lines as mlines
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from concurrent.futures import ProcessPoolExecutor
+import matplotlib.colors as mcolors
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# ---------------------------------------------------------------------
-# Import ECHT from phase.py
-# ---------------------------------------------------------------------
-from pathlib import Path
-import importlib.util
-_file = Path(__file__).resolve().parent.parent / "phase.py"
-_spec = importlib.util.spec_from_file_location("ECHT", _file)
-_module = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_module)
-ECHT = _module.ECHT
+from phase import ECHT
+from utils import _wrap_phase
 
-# ---------------------------------------------------------------------
 # Global parameters
-# ---------------------------------------------------------------------
 F0 = 10                # central frequency in Hz
-SFREQ = 256            # sampling frequency in Hz (for most experiments)
+SFREQ = 256            # sampling frequency in Hz
 BW_DEFAULT = F0 * 0.3  # default bandwidth (Hz)
 
 N_PHASE_SAMPLES = 90            # Samples of initial phase
-N_NOISE_TRIALS = int(1e4)       # Monte-Carlo trials for noise
+N_NOISE_TRIALS = int(1e6)       # Monte-Carlo trials for noise
+SNR_STEPS = 1000                # steps of the SNR range
 N_CYCLES = 2.1
 SMOOTH_WINDOW_CYCLES = 0
-N_WINDOW_STEPS = 100
+N_WINDOW_STEPS = 25
 
-N_WORKERS = min(9, max(1, (os.cpu_count() or 2) - 1))
+N_WORKERS = os.cpu_count() - 1
 
-MASTER_RNG = np.random.default_rng(0)
-
-# ---------------------------------------------------------------------
 # Figure style
-# ---------------------------------------------------------------------
 blue = "#4E79A7"
 orange = "#F28E2B"
 red = "#E15759"
@@ -70,17 +57,22 @@ global_alpha = 0.6
 COL_UNCAL = orange
 COL_CAL = blue
 
+FONT_SIZE = 20
+TICK_SIZE = 0.75 * FONT_SIZE
+LINE_WIDTH = 1.5
+AXIS_LINKS = 1.0        # Thickness of plot spines
+
 def set_mpl_style():
     """Global Matplotlib style"""
     mpl.rcParams.update({
         "font.family": "serif",
-        "font.size": 7,
-        "axes.labelsize": 7,
-        "axes.titlesize": 7,
-        "legend.fontsize": 7,
-        "xtick.labelsize": 7,
-        "ytick.labelsize": 7,
-        "lines.linewidth": 1.1,
+        "font.size": FONT_SIZE,
+        "axes.labelsize": FONT_SIZE,
+        "axes.titlesize": AXIS_LINKS,
+        "legend.fontsize": FONT_SIZE - 2,
+        "xtick.labelsize": TICK_SIZE,
+        "ytick.labelsize": TICK_SIZE,
+        "lines.linewidth": LINE_WIDTH,
         "figure.dpi": 300,
         "text.usetex": True,
     })
@@ -94,6 +86,17 @@ COMMON_BBOX = dict(
 )
 
 
+def lighten_color(color, amount=0.5):
+    """
+    Lightens the given color by a specific amount.
+    amount: 0 to 1 (0 = no change, 1 = pure white)
+    """
+    # Convert any matplotlib color (hex, name, etc.) to RGB tuple (0-1 range)
+    c = mcolors.to_rgb(color)
+    new_c = tuple(val + (1 - val) * amount for val in c)
+
+    return new_c
+
 def add_panel_label(ax, label, text):
     """
     Panel label in the same style as intro diagram, e.g. '(A) Window length'.
@@ -101,29 +104,22 @@ def add_panel_label(ax, label, text):
     ax.text(
         0.02,
         1.02,
-        rf"\textbf{{({label})}} {text}",
+        rf"\textbf{{{label}}} {text}",
         transform=ax.transAxes,
         ha="left",
         va="bottom",
         # bbox=COMMON_BBOX,
     )
 
-# ---------------------------------------------------------------------
 # Utility functions
-# ---------------------------------------------------------------------
-def wrap_phase(phi):
-    """Wrap phase to [-pi, pi]."""
-    return (phi + np.pi) % (2 * np.pi) - np.pi
-
-
 def angle_diff(phi1, phi2):
     """Smallest signed difference phi1 - phi2 in [-pi, pi]."""
-    return wrap_phase(phi1 - phi2)
+    return _wrap_phase(phi1 - phi2)
 
 
 def generate_cosine_window(n_cycles, f0, sfreq, phi0=0.0):
     """
-    Generate x[n] = cos(2π f0 t + phi0) with a given number of cycles.
+    Generate x[n] = cos(2 pi f0 t + phi0) with a given number of cycles.
 
     Returns
     -------
@@ -139,7 +135,7 @@ def generate_cosine_window(n_cycles, f0, sfreq, phi0=0.0):
     t = np.arange(n_samples) / sfreq
     phase = 2 * np.pi * f0 * t + phi0
     x = np.cos(phase)
-    true_phase_end = wrap_phase(phase[-1])
+    true_phase_end = _wrap_phase(phase[-1])
     return t, x, true_phase_end
 
 
@@ -152,11 +148,10 @@ def endpoint_phase_echt(
     filter_type="butter",
     calibrate=False,
 ):
-    """Endpoint phase using ECHT (with optional calibration)."""
     if bw is None:
         bw = BW_DEFAULT
-    l_freq = f0 - bw / 2.0
-    h_freq = f0 + bw / 2.0
+    l_freq = f0 - bw / 2
+    h_freq = f0 + bw / 2
     echt = ECHT(
         l_freq=l_freq,
         h_freq=h_freq,
@@ -165,18 +160,12 @@ def endpoint_phase_echt(
         filter_type=filter_type,
         calibrate=calibrate,
         f0=(f0 if calibrate else None),
-        # mmse=(True if calibrate else False),
-        # mmse_sigma_w2=(1e-4 if calibrate else None),
-        # mmse_n_grid=512,
-        # mmse_amp_profile=(True if calibrate else None),
     )
     z = echt.fit_transform(x).ravel()
     return np.angle(z[-1])
 
 
-# ---------------------------------------------------------------------
 # Window length sweep
-# ---------------------------------------------------------------------
 def compute_window_length_sweep():
     """
     Window-length sweep summarized as violin plots over ±0.5 cycles.
@@ -205,7 +194,6 @@ def compute_window_length_sweep():
             for i in range(N_PHASE_SAMPLES):
                 phi0 = i / N_PHASE_SAMPLES * 2 * np.pi
 
-                # Non-integer number of cycles here
                 _, x, true_phase_end = generate_cosine_window(
                     n_cyc, F0, SFREQ, phi0
                 )
@@ -227,7 +215,6 @@ def compute_window_length_sweep():
                 errs_unc_band.append(err_unc)
                 errs_cal_band.append(err_cal)
 
-        # One big distribution per cycle band
         unc.append(errs_unc_band)
         cal.append(errs_cal_band)
 
@@ -283,38 +270,44 @@ def plot_window_length_sweep(ax, r):
             else:
                 verts[:, 0] = np.maximum(xs, pos)
 
-            body.set_facecolor(color)
+            body.set_facecolor(lighten_color(color, 0.3))
             body.set_edgecolor("black")
-            body.set_alpha(global_alpha)
+            body.set_alpha(1)
+            body.set_linewidth(LINE_WIDTH)
 
 
     # median of |error| to display in violins
     mean_unc = [np.median(u) for u in unc]
     mean_cal = [np.median(ca) for ca in cal]
 
-    ax.scatter(positions - 0.1, mean_unc, marker=">", s=20,
+    ax.scatter(positions - 0.1, mean_unc, marker=">", s=75,
                color=COL_UNCAL, zorder=3, label="uncalibrated",
-               edgecolor="black", linewidth=0.75)
-    ax.scatter(positions + 0.1, mean_cal, marker="<", s=20,
+               edgecolor="black", linewidth=LINE_WIDTH)
+    ax.scatter(positions + 0.1, mean_cal, marker="<", s=75,
                color=COL_CAL, zorder=3, label="calibrated",
-               edgecolor="black", linewidth=0.75)
+               edgecolor="black", linewidth=LINE_WIDTH)
 
+    # ax.set_xticks(positions)
+    # ax.set_xticklabels([rf"{c} $\pm 0.5$" for c in cycles])
+
+    cycles = r["cycles"]
+    positions = np.arange(len(cycles))
+    interval_labels = [rf"$[{c - 0.5:.1f},{c + 0.5:.1f}]$" for c in cycles]
     ax.set_xticks(positions)
-    ax.set_xticklabels([rf"{c}\,$\pm$\,0.5" for c in cycles])
+    ax.set_xticklabels(interval_labels)
+
     ax.set_xlabel(r"cycles of $1/f_0$")
     ax.set_ylim(0, 45)
     ax.set_yticks([10, 20, 30, 40])
     ax.set_yticklabels([r"$10^\circ$", r"$20^\circ$", r"$30^\circ$", r"$40^\circ$"])
-    ax.grid(True, axis="y", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.grid(True, linestyle=":", axis="y")
+    ax.set_axisbelow(True)
 
 
-
-# ---------------------------------------------------------------------
 # Bandwidth sweep
-# ---------------------------------------------------------------------
 def compute_bandwidth_sweep():
     bw_factors = np.linspace(0.1, 1, 100)
-    nyq = SFREQ / 2.0
+    nyq = SFREQ / 2
 
     valid_f = []
     mean_unc = []
@@ -328,9 +321,9 @@ def compute_bandwidth_sweep():
 
     for f in bw_factors:
         bw = f * F0
-        l_freq = F0 - bw / 2.0
-        h_freq = F0 + bw / 2.0
-        if l_freq <= 0.0 or h_freq >= nyq:
+        l_freq = F0 - bw / 2
+        h_freq = F0 + bw / 2
+        if l_freq <= 0 or h_freq >= nyq:
             continue
 
         errs_unc = []
@@ -379,10 +372,10 @@ def plot_bandwidth_sweep(ax, r):
     mean_cal, std_cal, max_cal = r["mean_cal"], r["std_cal"], r["max_cal"]
 
     line_mu_unc, = ax.plot(
-        f, mean_unc, "-", label="uncalibrated", color=COL_UNCAL
+        f, mean_unc, "-", label="uncalibrated", color=COL_UNCAL, linewidth=LINE_WIDTH
     )
     line_mu_cal, = ax.plot(
-        f, mean_cal, "--", label="calibrated", color=COL_CAL
+        f, mean_cal, "--", label="calibrated", color=COL_CAL, linewidth=LINE_WIDTH
     )
 
     lower_unc = np.clip(mean_unc - std_unc, 0, None)
@@ -400,14 +393,13 @@ def plot_bandwidth_sweep(ax, r):
     )
 
     ax.set_xlabel(r"Bandwidth / $f_0$")
-    ax.set_ylabel(r"$|$Phase error$|$ $[^\circ]$")
+    ax.set_ylabel(r"$|$phase error$|$ $[^\circ]$")
     ax.set_ylim(bottom=0)
-    ax.grid(True, which="both", axis="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.grid(True, linestyle=":")
+    ax.set_axisbelow(True)
 
 
-# ---------------------------------------------------------------------
 # Filter order sweep
-# ---------------------------------------------------------------------
 def compute_order_sweep():
     orders = np.array([1, 2, 3, 4, 5])
 
@@ -490,56 +482,71 @@ def plot_order_sweep(ax, r):
     ax.set_xticks(orders)
     ax.set_xticklabels(2 * orders)
     ax.set_ylim(bottom=0)
-    ax.grid(True, which="both", axis="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    # ax.grid(True, which="both", axis="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.grid(True, linestyle=":")
+    ax.set_axisbelow(True)
 
-
-
-# ---------------------------------------------------------------------
 # SNR sweep
-# ---------------------------------------------------------------------
-def compute_snr_sweep(seed):
+def _snr_one_point(args):
+    snr_db, x_clean, true_phase_end, signal_power, seed = args
     rng = np.random.default_rng(seed)
-    snr_db_list = np.linspace(-10, 20, 1000)
+
+    snr_lin = 10 ** (snr_db / 10.0)
+    noise_std = np.sqrt(signal_power / snr_lin)
+
+    errs_unc = np.empty(N_NOISE_TRIALS)
+    errs_cal = np.empty(N_NOISE_TRIALS)
+
+    for k in range(N_NOISE_TRIALS):
+        noise = rng.normal(0.0, noise_std, size=x_clean.shape)
+        x_noisy = x_clean + noise
+        phi_unc = endpoint_phase_echt(
+            x_noisy, F0, SFREQ, bw=BW_DEFAULT, order=2, calibrate=False
+        )
+        phi_cal = endpoint_phase_echt(
+            x_noisy, F0, SFREQ, bw=BW_DEFAULT, order=2, calibrate=True
+        )
+        errs_unc[k] = np.degrees(np.abs(angle_diff(phi_unc, true_phase_end)))
+        errs_cal[k] = np.degrees(np.abs(angle_diff(phi_cal, true_phase_end)))
+
+    return (
+        float(errs_unc.mean()),
+        float(errs_unc.std(ddof=0)),
+        float(errs_cal.mean()),
+        float(errs_cal.std(ddof=0)),
+    )
+
+def compute_snr_sweep(seed, print_every=50):
+    rng = np.random.default_rng(seed)
+    snr_db_list = np.linspace(-10, 20, SNR_STEPS)
 
     n_cycles = N_CYCLES
     _, x_clean, true_phase_end = generate_cosine_window(
         n_cycles, F0, SFREQ, phi0=0.0
     )
-    signal_power = np.mean(x_clean ** 2)
+    signal_power = float(np.mean(x_clean ** 2))
 
-    mean_unc = []
-    std_unc = []
-    mean_cal = []
-    std_cal = []
+    per_point_seeds = rng.integers(0, 2**32 - 1, size=len(snr_db_list))
 
-    for snr_db in snr_db_list:
-        snr_lin = 10 ** (snr_db / 10.0)
-        noise_power = signal_power / snr_lin
-        noise_std = np.sqrt(noise_power)
+    task_args = [
+        (snr_db, x_clean, true_phase_end, signal_power, int(per_point_seeds[i]))
+        for i, snr_db in enumerate(snr_db_list)
+    ]
 
-        errs_unc = []
-        errs_cal = []
-        for _ in range(N_NOISE_TRIALS):
-            noise = rng.normal(0.0, noise_std, size=x_clean.shape)
-            x_noisy = x_clean + noise
-            phi_unc = endpoint_phase_echt(
-                x_noisy, F0, SFREQ, bw=BW_DEFAULT, order=2, calibrate=False
-            )
-            phi_cal = endpoint_phase_echt(
-                x_noisy, F0, SFREQ, bw=BW_DEFAULT, order=2, calibrate=True
-            )
-            err_unc = np.degrees(np.abs(angle_diff(phi_unc, true_phase_end)))
-            err_cal = np.degrees(np.abs(angle_diff(phi_cal, true_phase_end)))
-            errs_unc.append(err_unc)
-            errs_cal.append(err_cal)
+    total = len(task_args)
+    results = [None] * total  # pre-allocate to preserve order
 
-        errs_unc = np.asarray(errs_unc)
-        errs_cal = np.asarray(errs_cal)
+    with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+        futures = {ex.submit(_snr_one_point, arg): i for i, arg in enumerate(task_args)}
 
-        mean_unc.append(float(errs_unc.mean()))
-        std_unc.append(float(errs_unc.std(ddof=0)))
-        mean_cal.append(float(errs_cal.mean()))
-        std_cal.append(float(errs_cal.std(ddof=0)))
+        for completed, fut in enumerate(as_completed(futures), start=1):
+            idx = futures[fut]
+            results[idx] = fut.result()
+
+            if completed % print_every == 0 or completed == total:
+                print(f"  SNR sweep: {completed}/{total} points done", flush=True)
+
+    mean_unc, std_unc, mean_cal, std_cal = zip(*results)
 
     return {
         "snr_db": snr_db_list,
@@ -548,7 +555,6 @@ def compute_snr_sweep(seed):
         "mean_cal": np.array(mean_cal),
         "std_cal": np.array(std_cal),
     }
-
 
 def plot_snr_sweep(ax, r):
     snr_db = r["snr_db"]
@@ -580,21 +586,20 @@ def plot_snr_sweep(ax, r):
     ax.set_xlabel(r"Input SNR (dB)")
     ax.set_ylabel(r"$|$phase error$|$ $[^\circ]$")
     ax.set_ylim(0.8 * min(mean_cal), 1.2 * max(mean_unc))
-    ax.grid(True, which="both", axis="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.grid(True, linestyle=":", which="both", axis="both",)
+    ax.set_axisbelow(True)
 
-
-# ---------------------------------------------------------------------
 # Chirp robustness
-# ---------------------------------------------------------------------
 def generate_detuned_cosine(n_cycles, f0, sfreq, delta_frac=0.0, phi0=0.0):
+    f_sig = f0 * (1.0 + delta_frac)
+
     duration = n_cycles / f0
-    n_samples = int(round(duration * sfreq))
+    n_samples = int(duration * sfreq)
     t = np.arange(n_samples) / sfreq
 
-    f_sig = f0 * (1.0 + delta_frac)
     phase = 2 * np.pi * f_sig * t + phi0
     x = np.cos(phase)
-    true_phase_end = wrap_phase(phase[-1])
+    true_phase_end = _wrap_phase(phase[-1])
     return t, x, true_phase_end
 
 def compute_chirp_robustness():
@@ -638,7 +643,6 @@ def compute_chirp_robustness():
         "std_cal": np.array(std_cal),
     }
 
-
 def plot_chirp_robustness(ax, r):
     df = r["delta_fracs"]
     mean_unc, std_unc = r["mean_unc"], r["std_unc"]
@@ -667,13 +671,12 @@ def plot_chirp_robustness(ax, r):
 
     ax.set_xlabel(r"$\Delta f/f_0$")
     ax.set_ylim(bottom=0)
-    ax.grid(True, which="both", axis="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    # ax.grid(True, which="both", axis="both", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.grid(True, linestyle=":")
+    ax.set_axisbelow(True)
 
 
-
-# ---------------------------------------------------------------------
 # Filter-type comparison
-# ---------------------------------------------------------------------
 def compute_filter_type():
     n_cycles = N_CYCLES
     order = 1
@@ -697,7 +700,6 @@ def compute_filter_type():
                 n_cycles, F0, SFREQ, phi0
             )
 
-            # ECHT with given filter type, uncalibrated
             phi_unc = endpoint_phase_echt(
                 x,
                 F0,
@@ -707,7 +709,6 @@ def compute_filter_type():
                 filter_type=ftype,
                 calibrate=False,
             )
-            # ECHT with given filter type, calibrated
             phi_cal = endpoint_phase_echt(
                 x,
                 F0,
@@ -783,36 +784,37 @@ def plot_filter_type(ax, r):
     x = np.arange(len(labels))
     width = 0.35
 
-    face_unc = mcolors.to_rgba(COL_UNCAL, alpha=global_alpha)
-    face_cal = mcolors.to_rgba(COL_CAL, alpha=global_alpha)
+    face_unc = mcolors.to_rgba(lighten_color(COL_UNCAL, 0.3))
+    face_cal = mcolors.to_rgba(lighten_color(COL_CAL, 0.3))
 
     bars_unc = ax.bar(
         x - width / 2,
         mean_unc,
         width,
         yerr=std_unc,
-        capsize=2,
+        capsize=5,
         label="uncalibrated",
         color=face_unc,
         edgecolor="black",
-        linewidth=1,
+        linewidth=LINE_WIDTH,
     )
     bars_cal = ax.bar(
         x + width / 2,
         mean_cal,
         width,
         yerr=std_cal,
-        capsize=2,
+        capsize=5,
         label="calibrated",
         color=face_cal,
         edgecolor="black",
-        linewidth=1,
+        linewidth=LINE_WIDTH,
     )
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.set_ylim(0, y_lim)
-    ax.grid(True, axis="y", linestyle=":", linewidth=0.5, alpha=0.7)
+    ax.grid(True, linestyle=":", axis="y")
+    ax.set_axisbelow(True)
 
     # Annotate Cheby II uncalibrated height on its clipped bar
     if idx_out is not None:
@@ -826,21 +828,15 @@ def plot_filter_type(ax, r):
             f"{val_out:.1f}°",
             ha="center",
             va="top",
-            fontsize=7,
+            fontsize=TICK_SIZE,
             rotation=90,
         )
 
 
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
-def main(output_prefix="ecHT_simulations"):
+def main(output_prefix="../results/ecHT_simulations"):
     set_mpl_style()
+    seed = 0
 
-    # Prepare seeds for the six independent computations
-    seed = MASTER_RNG.integers(0, 2**32 - 1, size=1)
-
-    # Computations in parallel
     with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
         futures = [
             ex.submit(compute_window_length_sweep),  # 0
@@ -859,7 +855,7 @@ def main(output_prefix="ecHT_simulations"):
          res_chirp,
          res_filter) = results
 
-    fig, axes = plt.subplots(2, 3, figsize=(7.0, 4.5))
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
     ax = axes.ravel()
 
     plot_bandwidth_sweep(ax[0], res_bandwidth)  # Bandwidth
@@ -870,12 +866,12 @@ def main(output_prefix="ecHT_simulations"):
     plot_window_length_sweep(ax[5], res_window)  # Window length
 
     # Panel labels in intro style
-    add_panel_label(ax[0], "A", "Bandwidth")
-    add_panel_label(ax[1], "B", "Filter order")
-    add_panel_label(ax[2], "C", "Frequency drift")
-    add_panel_label(ax[3], "D", "Noise robustness")
-    add_panel_label(ax[4], "E", "Filter type")
-    add_panel_label(ax[5], "F", "Window length")
+    add_panel_label(ax[0], "a", "Bandwidth")
+    add_panel_label(ax[1], "b", "Filter order")
+    add_panel_label(ax[2], "c", "Frequency drift")
+    add_panel_label(ax[3], "d", "Noise robustness")
+    add_panel_label(ax[4], "e", "Filter type")
+    add_panel_label(ax[5], "f", "Window length")
 
 
     # Shared legend (uncalibrated, calibrated, ±1 SD)
