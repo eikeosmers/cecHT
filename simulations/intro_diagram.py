@@ -11,12 +11,6 @@ Outputs
 Two files are written:
 - ecHT_vs_HT_infographic.png
 - ecHT_vs_HT_infographic.pdf
-
-Notes
------
-- The figure is rendered using Matplotlib and SciPy.
-- LaTeX rendering is optional. If use_tex=True and LaTeX is not installed,
-  Matplotlib may raise an error.
 """
 
 import numpy as np
@@ -29,54 +23,32 @@ from matplotlib.patches import Rectangle, ConnectionPatch
 from scipy.fft import fft, ifft, fftshift, next_fast_len
 from scipy.signal import butter, freqz
 
-# ---------------------------------------------------------------------
-# Import ECHT from phase.py
-# ---------------------------------------------------------------------
-from pathlib import Path
-import importlib.util
-_file = Path(__file__).resolve().parent.parent / "phase.py"
-_spec = importlib.util.spec_from_file_location("ECHT", _file)
-_module = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_module)
-ECHT = _module.ECHT
+from phase import ECHT
 
-
-def analytic_mask(n_fft: int) -> np.ndarray:
+def analytic_mask(n_fft):
     """
     Standard Hilbert analytic-signal multiplier (no band-pass).
-
-    Parameters
-    ----------
-    n_fft : int
-        FFT length.
-
-    Returns
-    -------
-    h : ndarray, shape (n_fft,)
-        Real-valued frequency-domain multiplier implementing the analytic
-        signal construction (DC=1, positive frequencies doubled, negative=0;
-        Nyquist=1 for even n_fft).
     """
     h = np.zeros(n_fft, dtype=float)
-    h[0] = 1.0
+    h[0] = 1
     if n_fft % 2 == 0:
         # even length: DC + positive + Nyquist
-        h[1:n_fft // 2] = 2.0
-        h[n_fft // 2] = 1.0
+        h[1:n_fft // 2] = 2
+        h[n_fft // 2] = 1
     else:
         # odd length: DC + positive
-        h[1:(n_fft + 1) // 2] = 2.0
+        h[1:(n_fft + 1) // 2] = 2
     return h
 
-def make_echt_vs_ht_infographic(
-    sfreq: float = 1000,
-    f0: float = 5.23,        # central frequency of interest
-    n_cycles: float = 1.87,  # number of cycles in the window
-    extra_cycles: float = 0.2,
-    filt_order: int = 2,     # Butterworth band-pass order
-    pad_factor: int = 64,
-    save_base: str = "ecHT_vs_HT_infographic",
-    use_tex: bool = True,
+def make_infographic(
+    sfreq = 1000,
+    f0 = 5.23,        # central frequency of interest
+    n_cycles = 1.57,  # number of cycles in the window
+    extra_cycles = 0.2,
+    filt_order = 2,     # Butterworth band-pass order
+    pad_factor = 64,
+    save_base = "../results/ecHT_vs_HT_infographic",
+    use_tex = True,
 ):
     """
     Generate a 6-panel ecHT vs HT infographic with a Butterworth band-pass.
@@ -114,28 +86,24 @@ def make_echt_vs_ht_infographic(
     None
         Writes ``{save_base}.png`` and ``{save_base}.pdf``.
     """
-    # --------------------------------------------------------------
     # Signal: finite window extracted from a longer cosine
-    # --------------------------------------------------------------
     n_samples = int(round(n_cycles * sfreq / f0))
     t_win = np.arange(n_samples) / sfreq
-    phi0 = 0
+    phi0 = 2
     x_win = np.cos(2 * np.pi * f0 * t_win + phi0)
+    x_win_quad = np.sin(2 * np.pi * f0 * t_win + phi0)
 
     extra_samples = int(round(extra_cycles * sfreq / f0))
     t_pre = np.arange(-extra_samples, 0) / sfreq
     t_long = np.concatenate([t_pre, t_win])
     x_long = np.cos(2 * np.pi * f0 * t_long + phi0)
 
-    window_start = 0.0
+    window_start = 0
     window_end = t_win[-1]
 
-    # --------------------------------------------------------------
-    # ecHT setup (we only use its analytic kernel h_)
-    # --------------------------------------------------------------
-    BW = f0 * 0.8
-    l_freq = f0 - BW / 2.0
-    h_freq = f0 + BW / 2.0
+    BW = f0 * 0.7
+    l_freq = f0 - BW / 2
+    h_freq = f0 + BW / 2
 
     n_fft = next_fast_len(pad_factor * n_samples)
 
@@ -153,11 +121,8 @@ def make_echt_vs_ht_infographic(
     n_fft = echt.n_fft
     h_echt = echt.h_  # analytic (Hilbert) multiplier
 
-    # --------------------------------------------------------------
-    # Frequency-domain objects
-    # --------------------------------------------------------------
     X_fft = fft(x_win, n_fft)
-    freqs = np.fft.fftfreq(n_fft, d=1.0 / sfreq)
+    freqs = np.fft.fftfreq(n_fft, d=1 / sfreq)
     freqs_shift = fftshift(freqs)
     X_fft_shift = fftshift(X_fft)
 
@@ -166,17 +131,12 @@ def make_echt_vs_ht_infographic(
     X_fft_ht = X_fft * h_ht
     X_fft_ht_shift = fftshift(X_fft_ht)
 
-    # --------------------------------------------------------------
-    # Real Butterworth band-pass on the actual FFT grid
-    # --------------------------------------------------------------
     Wn = [l_freq / (sfreq / 2), h_freq / (sfreq / 2)]
     b, a = butter(filt_order, Wn, btype="band")
 
-    # Evaluate H(e^{jω}) at FFT grid frequencies:
-    # freqs are in Hz; digital rad/sample is ω = 2π f / sfreq.
+    # Evaluate H(e^{j omega}) at FFT grid frequencies:
     w = 2 * np.pi * freqs / sfreq
-    w_mod = np.mod(w, 2 * np.pi)  # bring into [0, 2π)
-    _, H_fftgrid = freqz(b, a, worN=w_mod)  # complex response on FFT grid
+    _, H_fftgrid = freqz(b, a, worN=w)
 
     H_bp = H_fftgrid                 # length n_fft, same order as X_fft
     H_bp_shift = fftshift(H_bp)      # centered for plotting
@@ -189,9 +149,6 @@ def make_echt_vs_ht_infographic(
     X_fft_echt = X_fft_analytic * H_bp
     X_fft_echt_shift = fftshift(X_fft_echt)
 
-    # --------------------------------------------------------------
-    # Time-domain analytic signals
-    # --------------------------------------------------------------
     z_ht_full = ifft(X_fft_ht)
     z_echt_full = ifft(X_fft_echt)
 
@@ -210,18 +167,18 @@ def make_echt_vs_ht_infographic(
     n_show = min(n_samples, 2 * samples_per_cycle)
     idx_end = np.arange(n_samples - n_show, n_samples)
 
-    # --------------------------------------------------------------
-    # Figure with 6 main panels + legend + zoom
-    # --------------------------------------------------------------
+    FONT_SIZE = 24
+    TICK_SIZE = 0.75 * FONT_SIZE
+    LINE_WIDTH = 2.5
     mpl.rcParams.update({
         "font.family": "serif",
-        "font.size": 8,
-        "axes.labelsize": 8,
-        "axes.titlesize": 9,
-        "legend.fontsize": 7,
-        "xtick.labelsize": 7,
-        "ytick.labelsize": 7,
-        "lines.linewidth": 1.0,
+        "font.size": FONT_SIZE,
+        "axes.labelsize": FONT_SIZE,
+        "axes.titlesize": FONT_SIZE,
+        "legend.fontsize": FONT_SIZE-2,
+        "xtick.labelsize": TICK_SIZE,
+        "ytick.labelsize": TICK_SIZE,
+        "lines.linewidth": LINE_WIDTH,
         "figure.dpi": 300,
         "text.usetex": use_tex,
     })
@@ -243,7 +200,7 @@ def make_echt_vs_ht_infographic(
 
     # 2 × 4 layout with narrower 4th column
     fig, axes = plt.subplots(
-        2, 4, figsize=(7, 4.5),
+        2, 4, figsize=(12, 8),
         gridspec_kw={"width_ratios": [1, 1, 1, 0.5]}
     )
     ax1 = axes[0, 0]        # (A)
@@ -255,18 +212,17 @@ def make_echt_vs_ht_infographic(
     ax6 = axes[1, 2]        # (F)
     ax_zoom = axes[1, 3]    # zoom (bottom-right special)
 
-    # Common vertical position (in axes coordinates) for labels under each plot
     y_under = -0.02
 
     # (A) Long signal + faint analysis window at the end
-    ax1.plot(t_long, x_long, lw=1, color=gray, label="Underlying signal")
+    ax1.plot(t_long, x_long, lw=0.75*LINE_WIDTH, color=gray, label="Underlying signal")
     ax1.axvspan(window_start, window_end, alpha=0.15, color=gray)
 
     mask_win = (t_long >= window_start) & (t_long <= window_end)
     ax1.plot(
         t_long[mask_win],
         x_long[mask_win],
-        lw=1.5,
+        lw=LINE_WIDTH,
         color=col_sig,
         label="Analysis window",
     )
@@ -279,7 +235,7 @@ def make_echt_vs_ht_infographic(
         transform=transA,
         ha="left",
         va="top",
-        fontsize=10,
+        fontsize=TICK_SIZE,
         color="k",
         clip_on=False,
     )
@@ -290,49 +246,49 @@ def make_echt_vs_ht_infographic(
         transform=transA,
         ha="right",
         va="top",
-        fontsize=10,
+        fontsize=TICK_SIZE,
         color="k",
         clip_on=False,
     )
 
     # (B) DFT spectrum
-    ax2.plot(freqs_shift, np.abs(X_fft_shift), lw=1.5, color=col_sig)
+    ax2.plot(freqs_shift, np.abs(X_fft_shift), lw=LINE_WIDTH, color=col_sig)
     ax2.set_xlim(-3 * f0, 3 * f0)
 
     transB2 = mtransforms.blended_transform_factory(ax2.transData, ax2.transAxes)
     ax2.text(-f0, y_under, r"$-f_0$", transform=transB2,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax2.text(0, y_under, r"$0$", transform=transB2,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax2.text(f0, y_under, r"$+f_0$", transform=transB2,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
 
     # (C) Analytic spectrum (Hilbert)
-    ax3.plot(freqs_shift, np.abs(X_fft_ht_shift), lw=1.5, color=col_sig)
+    ax3.plot(freqs_shift, np.abs(X_fft_ht_shift), lw=LINE_WIDTH, color=col_sig)
     ax3.set_xlim(-3 * f0, 3 * f0)
 
     transB3 = mtransforms.blended_transform_factory(ax3.transData, ax3.transAxes)
     ax3.text(-f0, y_under, r"$-f_0$", transform=transB3,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax3.text(0, y_under, r"$0$", transform=transB3,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax3.text(f0, y_under, r"$+f_0$", transform=transB3,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
 
     # Legend in dedicated axis
     legend_elements = [
-        Line2D([0], [0], color=col_true, lw=1.5, ls="-",
+        Line2D([0], [0], color=col_true, lw=LINE_WIDTH, ls="-",
                label="True signal"),
-        Line2D([0], [0], color=col_ht, lw=1.5, ls="--",
+        Line2D([0], [0], color=col_ht, lw=LINE_WIDTH, ls="--",
                label="HT"),
-        Line2D([0], [0], color=col_echt, lw=1.5, ls="-.",
+        Line2D([0], [0], color=col_echt, lw=LINE_WIDTH, ls="-.",
                label="ecHT"),
     ]
     ax_legend.set_axis_off()
     ax_legend.legend(
         handles=legend_elements,
         loc="center",
-        fontsize=8,
+        fontsize=TICK_SIZE,
         frameon=True,
         handlelength=2.5,
     )
@@ -341,7 +297,7 @@ def make_echt_vs_ht_infographic(
     ax4.plot(
         freqs_shift,
         np.abs(X_fft_echt_shift),
-        lw=1.5,
+        lw=LINE_WIDTH,
         ls="-.",
         label="ecHT (analytic + band-pass)",
         color=col_echt,
@@ -352,7 +308,7 @@ def make_echt_vs_ht_infographic(
     ax4b.plot(
         freqs_shift,
         H_bp_amp,
-        lw=1.5,
+        lw=0.75*LINE_WIDTH,
         color=col_bp,
         alpha=0.9,
         label="Band-pass |H(f)| (norm., Butterworth)",
@@ -360,36 +316,36 @@ def make_echt_vs_ht_infographic(
 
     transB4 = mtransforms.blended_transform_factory(ax4.transData, ax4.transAxes)
     ax4.text(-f0, y_under, r"$-f_0$", transform=transB4,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax4.text(0, y_under, r"$0$", transform=transB4,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax4.text(f0, y_under, r"$+f_0$", transform=transB4,
-             ha="center", va="top", fontsize=10, clip_on=False)
+             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
 
     # (E) Time-domain over full window + true analytic signal
-    ax5.plot(t_long, x_long, lw=0.7, color=gray, alpha=0)
+    ax5.plot(t_long, x_long, lw=0.5*LINE_WIDTH, color=gray, alpha=0)
 
-    ax5.plot(t_win, x_win, lw=1.5, ls="-",
+    ax5.plot(t_win, x_win_quad, lw=LINE_WIDTH, ls="-",
              label="True analytic (real part)", color=col_true)
-    ax5.plot(t_win, np.real(z_ht), lw=1.5, ls="--",
+    ax5.plot(t_win, np.imag(z_ht), lw=LINE_WIDTH, ls="--",
              label="HT (real part of analytic)", color=col_ht)
-    ax5.plot(t_win, np.real(z_echt), lw=1.5, ls="-.",
+    ax5.plot(t_win, np.imag(z_echt), lw=LINE_WIDTH, ls="-.",
              label="ecHT (real part of analytic)", color=col_echt)
 
     transE = mtransforms.blended_transform_factory(ax5.transData, ax5.transAxes)
     ax5.text(window_start, y_under, r"$n=0$",
              transform=transE, ha="left", va="top",
-             fontsize=10, color="k", clip_on=False)
+             fontsize=TICK_SIZE, color="k", clip_on=False)
     ax5.text(window_end, y_under, r"$N-1$",
              transform=transE, ha="right", va="top",
-             fontsize=10, color="k", clip_on=False)
+             fontsize=TICK_SIZE, color="k", clip_on=False)
 
     # (F) Wrapped phase (deg) near window end, with dots at last samples
-    ax6.plot(t_long, x_long, lw=0.7, color=gray, alpha=0)
+    ax6.plot(t_long, x_long, lw=0.5*LINE_WIDTH, color=gray, alpha=0)
     ax6.plot(
         t_win[idx_end],
         phase_true_deg[idx_end],
-        lw=1.5,
+        lw=LINE_WIDTH,
         ls="-",
         label="True signal",
         color=col_true,
@@ -397,7 +353,7 @@ def make_echt_vs_ht_infographic(
     line_ht_p, = ax6.plot(
         t_win[idx_end],
         phase_ht_deg[idx_end],
-        lw=1.5,
+        lw=LINE_WIDTH,
         ls="--",
         label="HT",
         color=col_ht,
@@ -405,7 +361,7 @@ def make_echt_vs_ht_infographic(
     line_echt_p, = ax6.plot(
         t_win[idx_end],
         phase_echt_deg[idx_end],
-        lw=1.5,
+        lw=LINE_WIDTH,
         ls="-.",
         label="ecHT",
         color=col_echt,
@@ -434,7 +390,7 @@ def make_echt_vs_ht_infographic(
         transform=transF,
         ha="left",
         va="top",
-        fontsize=10,
+        fontsize=TICK_SIZE,
         color="k",
         clip_on=False,
     )
@@ -445,12 +401,12 @@ def make_echt_vs_ht_infographic(
         transform=transF,
         ha="right",
         va="top",
-        fontsize=10,
+        fontsize=TICK_SIZE,
         color="k",
         clip_on=False,
     )
 
-    # --- Zoom region indices and limits (used for both rectangle and zoom panel) ---
+    # Zoom region indices and limits (used for both rectangle and zoom panel)
     zoom_cycles = 0.1
     zoom_samples = int(round(zoom_cycles * samples_per_cycle))
     zoom_samples = max(2, zoom_samples)
@@ -482,14 +438,14 @@ def make_echt_vs_ht_infographic(
     dx = scale * width / 2
     dy = scale * height / 2
 
-    # rectangle on the original phase panel (F) – gray
+    # rectangle on the original phase panel (F)
     rect = Rectangle(
         (x0 - dx, y0 - dy),
         width + 2 * dx,
         height + 2 * dy,
         fill=False,
         edgecolor=gray,
-        linewidth=0.8,
+        linewidth=0.5*LINE_WIDTH,
         linestyle="-",
         zorder=0.5,
     )
@@ -499,21 +455,21 @@ def make_echt_vs_ht_infographic(
     ax_zoom.plot(
         t_win[zoom_idx],
         phase_true_deg[zoom_idx],
-        lw=1.5,
+        lw=LINE_WIDTH,
         ls="-",
         color=col_true,
     )
     ax_zoom.plot(
         t_win[zoom_idx],
         phase_ht_deg[zoom_idx],
-        lw=1.2,
+        lw=LINE_WIDTH,
         ls="--",
         color=col_ht,
     )
     ax_zoom.plot(
         t_win[zoom_idx],
         phase_echt_deg[zoom_idx],
-        lw=1.2,
+        lw=LINE_WIDTH,
         ls="-.",
         color=col_echt,
     )
@@ -524,14 +480,14 @@ def make_echt_vs_ht_infographic(
         phase_ht_deg[-1],
         ".",
         color=col_ht,
-        markersize=5,
+        markersize=5*LINE_WIDTH,
     )
     ax_zoom.plot(
         t_win[-1],
         phase_echt_deg[-1],
         ".",
         color=col_echt,
-        markersize=5,
+        markersize=5*LINE_WIDTH,
     )
 
     # Match data limits of the rectangle (preserves data-space of zoom)
@@ -544,10 +500,9 @@ def make_echt_vs_ht_infographic(
     ax_zoom.set_xticklabels([])
     ax_zoom.set_yticklabels([])
 
-    # Make zoom box (spines) gray
     for spine in ax_zoom.spines.values():
         spine.set_edgecolor(gray)
-        spine.set_linewidth(0.8)
+        spine.set_linewidth(0.5*LINE_WIDTH)
 
     # Lines indicating the zoom:
     # from right edge of rectangle in ax6 to left edge of zoom-box in ax_zoom
@@ -559,42 +514,40 @@ def make_echt_vs_ht_infographic(
     con1 = ConnectionPatch(
         xyA=(rect_right_x, rect_bottom_y),
         coordsA=ax6.transData,
-        xyB=(0.0, 0.0),
+        xyB=(0, 0),
         coordsB=ax_zoom.transAxes,
         color=gray,
-        linewidth=0.8,
+        linewidth=0.5*LINE_WIDTH,
         linestyle="-",
     )
     # top connection: rect top-right -> zoom top-left corner of axes box
     con2 = ConnectionPatch(
         xyA=(rect_right_x, rect_top_y),
         coordsA=ax6.transData,
-        xyB=(0.0, 1.0),
+        xyB=(0, 1),
         coordsB=ax_zoom.transAxes,
         color=gray,
-        linewidth=0.8,
+        linewidth=0.5*LINE_WIDTH,
         linestyle="-",
     )
     fig.add_artist(con1)
     fig.add_artist(con2)
 
-    # --------------------------------------------------------------
     # Panel labels
-    # --------------------------------------------------------------
     text_ha_align = "left"
     textx = 0.02
-    texty = 1.07
-    ax1.text(textx, texty, r"\textbf{(A)} $x(n)$", transform=ax1.transAxes,
+    texty = 1.13
+    ax1.text(textx, texty, r"\textbf{a} $x(n)$", transform=ax1.transAxes,
              va="top", ha=text_ha_align)#, bbox=common_bbox)
-    ax2.text(textx, texty, r"\textbf{(B)} DFT: $X(k)$", transform=ax2.transAxes,
+    ax2.text(textx, texty, r"\textbf{b} DFT: $|X(k)|$", transform=ax2.transAxes,
              va="top", ha=text_ha_align)#, bbox=common_bbox)
-    ax3.text(textx, texty, r"\textbf{(C)} Analytic: $X^+(k)$", transform=ax3.transAxes,
+    ax3.text(textx, texty, r"\textbf{c} Analytic: $|X^+(k)|$", transform=ax3.transAxes,
              va="top", ha=text_ha_align)#, bbox=common_bbox)
-    ax4.text(textx, texty, r"\textbf{(D)} Bandpass: $X^+(k)H(k)$", transform=ax4.transAxes,
+    ax4.text(textx, texty, r"\textbf{d} Bandpass: $|HX^+|$", transform=ax4.transAxes,
              va="top", ha=text_ha_align)#, bbox=common_bbox)
-    ax5.text(textx, texty, r"\textbf{(E)} $\mathrm{Re}\ \hat{z}(n)$", transform=ax5.transAxes,
+    ax5.text(textx, texty, r"\textbf{e} $\mathrm{Im}\ \hat{z}(n)$", transform=ax5.transAxes,
              va="top", ha=text_ha_align)#, bbox=common_bbox)
-    ax6.text(textx, texty, r"\textbf{(F)} $\hat{\theta}(n) = \arg \hat{z}(n)$", transform=ax6.transAxes,
+    ax6.text(textx, texty, r"\textbf{f} $\hat{\theta}(n) = \arg \hat{z}(n)$", transform=ax6.transAxes,
              va="top", ha=text_ha_align)#, bbox=common_bbox)
 
     for ax in [ax1, ax2, ax3, ax4, ax4b, ax5, ax6, ax_legend]:
@@ -614,4 +567,4 @@ def make_echt_vs_ht_infographic(
 
 
 if __name__ == "__main__":
-    make_echt_vs_ht_infographic()
+    make_infographic()
