@@ -178,4 +178,5 @@ If you find this work useful, please cite our paper:
 ## 📅 Updates
 
 - **21 Jan 2026** Initial preprint release
+- **26 Jun 2026** Camera-ready version release
 
