@@ -5,9 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 from matplotlib.lines import Line2D
 
-# ---------------------------------------------------------------------
+
 # Global style
-# ---------------------------------------------------------------------
 mpl.rcParams.update({
     "font.family": "serif",
     "font.size": 7,
@@ -40,9 +39,7 @@ COMMON_BBOX = dict(
     alpha=0.85,
 )
 
-# ---------------------------------------------------------------------
 # Circular helpers
-# ---------------------------------------------------------------------
 def _wrap_phase(phi):
     """Wrap phase to [-pi, pi]."""
     return (phi + np.pi) % (2 * np.pi) - np.pi
@@ -82,9 +79,7 @@ def _p_value_text(p, decimals=4):
         return rf"$p < 10^{{-{n}}}$"
     return rf"$p = {p:.{decimals}f}$"
 
-# ---------------------------------------------------------------------
 # Permutation test (paired, circular)
-# ---------------------------------------------------------------------
 def circular_permutation_test_paired(
     mu_a,
     mu_b,
@@ -126,9 +121,7 @@ def circular_permutation_test_paired(
     p = (exceed + 1) / (n_perm + 1)
     return float(np.degrees(T_obs)), float(p)
 
-# ---------------------------------------------------------------------
-# Shared ECHT sliding-window loop
-# ---------------------------------------------------------------------
+
 def run_echt_window_loop(x, ref_phase, echt_unc, echt_cal, win_len,
                          f0_seq=None):
     """Sliding-window ecHT phase-error loop shared by EEG and tremor pipelines.
@@ -162,9 +155,7 @@ def run_echt_window_loop(x, ref_phase, echt_unc, echt_cal, win_len,
 
     return err_unc, err_cal
 
-# ---------------------------------------------------------------------
 # Plot helpers
-# ---------------------------------------------------------------------
 def _style_polar_axis(ax, r_max, radial_ticks):
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
@@ -181,13 +172,13 @@ def _style_polar_axis(ax, r_max, radial_ticks):
     for label in ax.get_yticklabels():
         label.set_horizontalalignment("center")
 
-    r0 = r_max * 0.8
+    r0 = r_max * 1.175
     ax.text(np.deg2rad(45),  r0, r"$+45^\circ$", ha="center", va="center")
     ax.text(np.deg2rad(-45), r0, r"$-45^\circ$", ha="center", va="center")
 
 
 def _style_cart_axis(ax):
-    ax.grid(True, alpha=0.3, linestyle=":", linewidth=0.5)
+    ax.grid(True, alpha=0.3, linewidth=0.5)
     for spine in ax.spines.values():
         spine.set_linewidth(0.8)
         spine.set_color("0.2")
@@ -207,11 +198,11 @@ def make_figure(
     panel_c_xlabel="Tremor frequency CV",
     panel_c_title=r"$\mathbf{c}$ Phase error vs. tremor variability",
 ):
-    # --- stats ---
+    # stats
     mu_u, sd_u, plv_u, pli_u = _circ_stats(err_unc_rad)
     mu_c, sd_c, plv_c, pli_c = _circ_stats(err_cal_rad)
 
-    # --- paired circular permutation test ---
+    # paired circular permutation test
     _, p_perm = circular_permutation_test_paired(
         mu_a=trial_mu_unc,
         mu_b=trial_mu_cal,
@@ -221,7 +212,7 @@ def make_figure(
     )
     p_txt = _p_value_text(p_perm)
 
-    # --- histogram prep ---
+    # histogram prep
     bin_width_deg = 10
     bin_width_rad = np.radians(bin_width_deg)
     bins = np.arange(-180, 181, bin_width_deg)
@@ -237,7 +228,7 @@ def make_figure(
     r_max = max(r_max, 5)
     r_ticks = [t for t in [10, 20, 30] if t < r_max]
 
-    # --- layout ---
+    # layout
     fig = plt.figure(figsize=(7.0, 2.4))
     gs = fig.add_gridspec(
         1, 3,
@@ -250,7 +241,7 @@ def make_figure(
     axB = fig.add_subplot(gs[0, 1], projection="polar")
     axC = fig.add_subplot(gs[0, 2])
 
-    # --- Panel A ---
+    # Panel A
     axA.bar(centers, pu, width=bin_width_rad, color=COL_HT, edgecolor="0", linewidth=0.75)
     axA.plot([mu_u, mu_u], [0, r_max], color="0", linewidth=2)
     _style_polar_axis(axA, r_max, r_ticks)
@@ -262,7 +253,7 @@ def make_figure(
         transform=axA.transAxes, bbox=COMMON_BBOX, va="top", ha="center"
     )
 
-    # --- Panel B ---
+    # Panel B
     axB.bar(centers, pc, width=bin_width_rad, color=COL_ECHT, edgecolor="0", linewidth=0.75)
     axB.plot([mu_c, mu_c], [0, r_max], color="0", linewidth=2)
     _style_polar_axis(axB, r_max, r_ticks)
@@ -274,7 +265,7 @@ def make_figure(
         transform=axB.transAxes, bbox=COMMON_BBOX, va="top", ha="center"
     )
 
-    # --- Panel C ---
+    # Panel C
     mask = np.isfinite(trial_freq_cv) & np.isfinite(trial_abs_unc_rad) & np.isfinite(trial_abs_cal_rad)
     x = trial_freq_cv[mask]
     y_unc = np.degrees(trial_mu_unc[mask])
@@ -314,7 +305,7 @@ def make_figure(
 
     fig.tight_layout()
 
-    # --- force panel C to match polar panels' height (as in plot.py) ---
+    # force panel C to match polar panels' height
     bboxA = axA.get_position()
     bboxB = axB.get_position()
 
@@ -325,7 +316,7 @@ def make_figure(
     bboxC = axC.get_position()
     axC.set_position([bboxC.x0, bottom, bboxC.width, height])
 
-    # --- headings (aligned) ---
+    # headings
     bbA, bbB, bbC = axA.get_position(), axB.get_position(), axC.get_position()
     y_head = 0.92
     fig.text(bbA.x0, y_head, r"$\mathbf{a}$ ecHT phase error", ha="left", va="top")
