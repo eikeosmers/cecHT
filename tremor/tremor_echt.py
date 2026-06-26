@@ -21,7 +21,6 @@ from phase_track import ECHT
 from utils import _wrap_phase, make_figure, run_echt_window_loop
 
 
-# Helpers
 def _estimate_f0(seg, fs, f_min, f_max, interpolate=False):
     # Estimate dominant frequency in [f_min, f_max]
 
@@ -41,7 +40,7 @@ def _estimate_f0(seg, fs, f_min, f_max, interpolate=False):
     k0 = int(np.argmax(mag))
     freqs_b = freqs[band]
 
-    # Parabolic interpolation around the peak (in magnitude domain)
+    # Parabolic interpolation around the peak
     if interpolate:
         if 0 < k0 < (mag.size - 1):
             y1, y2, y3 = mag[k0 - 1], mag[k0], mag[k0 + 1]
@@ -78,7 +77,6 @@ def _calc_cv(x_filt, freq_win_len, freq_stride, L, fs):
 
     return freq_cv
 
-# Data loading
 def process_one_trial(
     x,
     phi_ds,
@@ -126,8 +124,6 @@ def process_one_trial(
     # online causal filter: initialise state from first sample
     zi = sosfilt_zi(sos) * x[0]
     x_filt_online, zi = sosfilt(sos, x, zi=zi)  # filter entire trial causally
-    # zi is carried forward sample-by-sample implicitly — sosfilt over
-    # the full array is equivalent to stepping sample-by-sample with state
 
     first_seg = x[:N]
 
@@ -178,7 +174,6 @@ def process_one_trial(
     trial_mu_cal = circmean(err_cal, high=np.pi, low=-np.pi)
     n_windows = int(err_unc.size)
 
-    # Tremor frequency CV
     freq_cv = _calc_cv(x_filt_online, freq_win_len, freq_stride, L, fs)
 
     return (err_unc, err_cal, freq_cv, trial_abs_unc, trial_abs_cal, trial_mu_unc, trial_mu_cal, n_windows)
@@ -291,10 +286,9 @@ def compute_endpoint_errors(
         trial_nwin
     )
 
-# Main
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--track", action="store_true", default=False,
+    parser.add_argument("--track", action="store_true", default=True,
                         help="Use f0-tracking mode (tremor_echt_track behaviour)")
     args = parser.parse_args()
 
@@ -356,6 +350,7 @@ def main():
     print(f"Mean calibrated error   (deg): {np.degrees(mean_cal):.2f} ± {np.degrees(std_cal):.2f}")
 
     save_base = "tremor_track" if track_f0 else "tremor_echt"
+    save_base = "../results/" + save_base
     make_figure(
         err_unc_rad=err_unc,
         err_cal_rad=err_cal,
