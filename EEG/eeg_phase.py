@@ -36,9 +36,9 @@ from helpers import (
     aggregate_and_save,
 )
 
-_CSV_PATH = "phase_error_per_file.csv"
-_NPZ_PATH = "phase_error_all.npz"
-_IAF_CSV  = "iaf_per_segment.csv"
+_CSV_PATH = "../results/phase_error_per_file.csv"
+_NPZ_PATH = "../results/phase_error_all.npz"
+_IAF_CSV  = "../results/iaf_per_segment.csv"
 _N_JOBS   = -1
 
 
