@@ -28,9 +28,9 @@ from utils import (
 )
 
 
-NPZ_PATH = "phase_error_all.npz"
-PHASE_CSV = "phase_error_per_file.csv"
-IAF_CSV = "iaf_per_segment.csv"
+NPZ_PATH = "../results/phase_error_all.npz"
+PHASE_CSV = "../results/phase_error_per_file.csv"
+IAF_CSV = "../results/iaf_per_segment.csv"
 
 
 
@@ -75,7 +75,7 @@ def plot_phase_error(
     phase_err_cal_deg_all,
     phase_csv_path=PHASE_CSV,
     iaf_csv_path=IAF_CSV,
-    save_base="phase_error_rod17",
+    save_base="../results/phase_error_rod17",
 ):
     # Data for panels A & B (Raw samples)
     phase_err_unc_rad = np.radians(np.asarray(phase_err_unc_deg_all))
@@ -91,7 +91,7 @@ def plot_phase_error(
     phase_subject = phase_df.groupby("participant").agg({
         "mean_unc_deg": "mean",
         "mean_cal_deg": "mean",
-        "n_samples": "sum" 
+        "n_samples": "sum"
     }).reset_index()
 
     # Prepare variables for the Significance Test
