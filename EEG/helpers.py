@@ -1,7 +1,7 @@
 """Helper functions for EEG phase-estimation error analysis.
 
 Contains:
-- IAF estimation (FOOOF + BIC peak validation, Savgol smoothing)
+- IAF estimation (FOOOF + BIC peak validation)
 - ecHT parameter derivation
 - Acausal reference analytic signal
 - ecHT vs Hilbert phase-error computation
@@ -179,16 +179,8 @@ def estimate_paf(data, info, fmin=7.5, fmax=14,
 
     return float(np.median(pafs)) if pafs else None
 
-# ecHT parameter derivation
 def params_from_f0(fs, f0, bw_factor=0.5):
     """Derive ecHT window length and band-pass edges from centre frequency.
-
-    Parameters
-    ----------
-    fs:        Sampling frequency
-    f0:        Centre frequency (Hz).
-    bw_factor: Band = f0 ± (bw_factor * f0) / 2.
-
     """
     win_len = int(round(0.512 * fs))   # Bressler et al. (2023): 128 samples @ 250 Hz
     bw = bw_factor * f0
@@ -200,21 +192,6 @@ def params_from_f0(fs, f0, bw_factor=0.5):
 def echt_vs_hilbert(data, fs, filt_order, f0, l_freq, h_freq, win_len,
                     ref_analytic_signal):
     """Run ecHT online (uncalibrated + calibrated) and return phase errors (deg).
-
-    Parameters
-    ----------
-    data
-    fs:         sampling frequency
-    filt_order
-    f0:         Centre frequency for calibrated ecHT.
-    l_freq, h_freq
-    win_len
-    ref_analytic_signal
-        Pre-computed acausal reference.  Computed internally when None.
-
-    Returns
-    -------
-    phase_err_unc_deg, phase_err_cal_deg
     """
     n = data.size
     if win_len < 3 or win_len >= n:
@@ -478,7 +455,6 @@ def process_segment(seg, iaf_window=10, bw_factor=0.5, filt_order=1):
         return _fail(sid, f"error: {e}")
 
 
-# Result aggregation and I/O
 def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
     """Aggregate per-segment results, print summary, and write output files.
     """
@@ -512,7 +488,6 @@ def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
             plv_cal=plv_c, pli_cal=pli_c,
         ))
 
-    # Summary
     print(f"\n=== Summary ===\n"
           f"  Total: {len(results)}   Valid: {len(all_unc)}   "
           f"No alpha: {len(no_alpha)}   Errors: {len(errors)}")
