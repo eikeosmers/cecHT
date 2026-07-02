@@ -19,8 +19,6 @@ Schreglmann, S. R., Wang, D., Peach, R. L., Li, J., Zhang, X.,
 """
 
 import numpy as np
-from scipy.fft import fft, ifft, fftshift, ifftshift, next_fast_len
-
 from phase import ECHT as _ECHT
 
 
@@ -90,12 +88,11 @@ class ECHT(_ECHT):
             h_freq,
             sfreq,
             n_fft=None,
-            fft_mode="fast",
             filt_order=1,
             filter_type="butter",
             calibrate=False,
             f0=None,
-    # --- optional dynamic bandpass tracking ---
+    # optional dynamic bandpass tracking
             bandpass_tracking=False,
             bandpass_update_mode="threshold",  # "threshold" or "always"
             bandpass_f0_thresh_hz=1,  # used if mode="threshold"
@@ -103,8 +100,6 @@ class ECHT(_ECHT):
             bandpass_min_hz=0.1,  # clamp low edge
             bandpass_max_hz=None,  # clamp high edge (None -> Nyquist-0.1)
     ):
-        # Reuse ECHT; keep behavior aligned with the original phase_track:
-        # - FFT length selection uses "fast" behavior (next_fast_len in base)
         super().__init__(
             l_freq=l_freq,
             h_freq=h_freq,
@@ -131,19 +126,17 @@ class ECHT(_ECHT):
         self.bandpass_min_hz = float(bandpass_min_hz)
         self.bandpass_max_hz = None if bandpass_max_hz is None else float(bandpass_max_hz)
 
-        # last f0 at which we UPDATED the bandpass (hysteresis reference)
+        # last f0 at which we updated the bandpass
         self._bp_last_f0_ = None
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
     def _update_bandpass(self, l_freq: float, h_freq: float):
         """
         Update band-pass dependent state without re-fitting.
 
         This updates:
-        - ``l_freq`` / ``h_freq``
-        - ``coef_`` (centered band-pass response used after fftshift)
+        - l_freq, h_freq
+        - coef_ (centered band-pass response used after fftshift)
         - invalidates calibration state that depends on the previous band-pass
         """
         if self.n_fft is None:
@@ -169,8 +162,7 @@ class ECHT(_ECHT):
         if self.bandpass_bw_hz is not None:
             self.bandpass_bw_hz = float(self.h_freq - self.l_freq)
 
-        # Recompute frequency-domain responses for the NEW bandpass
-        # (h_ is deterministic given n_fft, but recomputing it is cheap and safe)
+        # Recompute frequency-domain responses for the new bandpass
         self.h_, H_center = self._design_bandpass(
             l_freq=self.l_freq,
             h_freq=self.h_freq,
@@ -227,7 +219,6 @@ class ECHT(_ECHT):
     def _calib_gain_lut(self, f0: float, N: int):
         """
         Return (gain, err) for the current configuration.
-
         Uses a small cache keyed by (f0, N, bandpass/filter params, sfreq, n_fft).
         """
         if f0 is None:
@@ -292,58 +283,29 @@ class ECHT(_ECHT):
         return out
 
     def transform(self, X, f0=None):
-        """Apply the ECHT transform to the input signal.
-
-        Parameters
-        ----------
-        X : ndarray, shape=(n_samples, n_channels)
-        f0 : float | None
-            If provided and calibrate=True, compute and apply the complex scalar
-            calibration gain for this f0 (tracked per window).
-
-        Returns
-        -------
-        Xf : ndarray, shape=(n_samples, n_channels)
-        """
+        """Apply the ECHT transform with frequency tracking."""
         X = np.asarray(X)
-
         if not np.isrealobj(X):
             X = np.real(X)
 
-        # if not fitted
-        if self.h_ is None or self.coef_ is None:
-            self.fit(X)
-
-        if X.ndim == 1:
-            X = X[:, np.newaxis]
-
-        n_samples = X.shape[0]
-        if n_samples > self.n_fft:
-            raise ValueError(f"Input length {n_samples} exceeds n_fft {self.n_fft}.")
-
-        # --- optional dynamic bandpass tracking ---
         f0_used = f0 if f0 is not None else self.f0
         if f0_used is not None:
             self._update_bandpass_for_f0(float(f0_used))
 
-        # FFT -> analytic multiplier -> centred bandpass -> IFFT
-        Xf = fft(X, self.n_fft, axis=0)
-        Xf = Xf * self.h_[:, None]
-        Xf = fftshift(Xf, axes=0)
-        Xf = Xf * self.coef_
-        Xf = ifftshift(Xf, axes=0)
-        Xf = ifft(Xf, axis=0)
+        return super().transform(X, f0=f0)
 
-        # Dynamic complex-scalar endpoint calibration
-        if self.calibrate:
-            gain, _ = self._calib_gain_lut(f0 if f0 is not None else self.f0, n_samples)
-            if gain is not None:
-                Xf = Xf * gain
+    def _apply_calibration(self, Xf, **kwargs):
+        if not self.calibrate:
+            return Xf
 
-        # Truncate
-        Xf = Xf[:n_samples, :]
+        f0_val = kwargs.get('f0', self.f0)
+        n_samples = Xf.shape[0]
+
+        gain, _ = self._calib_gain_lut(f0_val, n_samples)
+        if gain is not None:
+            return Xf * gain
+
         return Xf
 
     def fit_transform(self, X, y=None):
-        """Fit the ECHT transform to the input signal and transform it."""
         return self.fit(X).transform(X)
