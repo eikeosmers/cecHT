@@ -148,6 +148,7 @@ class ECHT:
 
         # Centered frequency grid (Hz), length n_fft
         filt_freq = np.fft.fftshift(np.fft.fftfreq(n_fft, d=1 / sfreq))
+
         _, H_center = freqz(b, a, worN=filt_freq, fs=sfreq)
 
         return h, H_center
@@ -292,25 +293,11 @@ class ECHT:
 
         return self
 
-    def transform(self, X):
-        """Apply the ECHT transform to the input signal.
-
-        Parameters
-        ----------
-        X : ndarray, shape=(n_samples, n_channels)
-            The input signal to be transformed.
-
-        Returns
-        -------
-        Xf : ndarray, shape=(n_samples, n_channels)
-            The transformed signal (complex-valued).
-
-        """
+    def transform(self, X, **kwargs):
         X = np.asarray(X)
         if not np.isrealobj(X):
             X = np.real(X)
 
-        # if not fitted
         if self.h_ is None or self.coef_ is None:
             self.fit(X)
 
@@ -319,32 +306,20 @@ class ECHT:
 
         n_samples = X.shape[0]
 
-        # ---------------------------
-        # Frequency-domain
-        # ---------------------------
         Xf = fft(X, self.n_fft, axis=0)
-
-        # In contrast to :meth:`scipy.signal.hilbert()`, the code then
-        # multiplies the array by a frequency response vector of a causal
-        # bandpass filter.
         Xf = Xf * self.h_[:, None]
-
-        # The array is arranged, using fft_shift function, so that the zero-frequency
-        # component is at the center of the array, before the multiplication, and
-        # rearranged back so that the zero-frequency component is at the left of the
-        # array using ifft_shift(). Finally, the IFFT is computed.
         Xf = fftshift(Xf, axes=0)
         Xf = Xf * self.coef_
         Xf = ifftshift(Xf, axes=0)
         Xf = ifft(Xf, axis=0)
 
-        # Optional global endpoint calibration
+        Xf = self._apply_calibration(Xf, **kwargs)
+
+        return Xf[:n_samples, :]
+
+    def _apply_calibration(self, Xf, **kwargs):
         if self.calibrate and self.calib_gain_ is not None:
-            Xf = Xf * self.calib_gain_
-
-        # Truncate to original number of samples
-        Xf = Xf[:n_samples, :]
-
+            return Xf * self.calib_gain_
         return Xf
 
     def fit_transform(self, X, y=None):
