@@ -165,7 +165,7 @@ If you find this work useful, please cite our paper:
 
 ```bibtex
 @article{osmersOptimalCalibration2026,
-  title = {Optimal Calibration of the endpoint-corrected Hilbert Transform},
+  title = {Optimal Calibration of the Endpoint-corrected Hilbert Transform},
   author={Osmers, Eike AND Kolossa, Dorothea},
   journal={arXiv preprint arXiv:2601.13962},
   year={2026}
