@@ -36,7 +36,7 @@ BW_DEFAULT = F0 * 0.3  # default bandwidth (Hz)
 
 N_PHASE_SAMPLES = 90            # Samples of initial phase
 N_NOISE_TRIALS = int(1e6)       # Monte-Carlo trials for noise
-SNR_STEPS = 1000                # steps of the SNR range
+SNR_STEPS = 50                # steps of the SNR range
 N_CYCLES = 2.1
 SMOOTH_WINDOW_CYCLES = 0
 N_WINDOW_STEPS = 25
@@ -117,7 +117,7 @@ def angle_diff(phi1, phi2):
     return _wrap_phase(phi1 - phi2)
 
 
-def generate_cosine_window(n_cycles, f0, sfreq, phi0=0.0):
+def generate_cosine_window(n_cycles, f0, sfreq, phi0=0):
     """
     Generate x[n] = cos(2 pi f0 t + phi0) with a given number of cycles.
 
@@ -491,14 +491,14 @@ def _snr_one_point(args):
     snr_db, x_clean, true_phase_end, signal_power, seed = args
     rng = np.random.default_rng(seed)
 
-    snr_lin = 10 ** (snr_db / 10.0)
+    snr_lin = 10 ** (snr_db / 10)
     noise_std = np.sqrt(signal_power / snr_lin)
 
     errs_unc = np.empty(N_NOISE_TRIALS)
     errs_cal = np.empty(N_NOISE_TRIALS)
 
     for k in range(N_NOISE_TRIALS):
-        noise = rng.normal(0.0, noise_std, size=x_clean.shape)
+        noise = rng.normal(0, noise_std, size=x_clean.shape)
         x_noisy = x_clean + noise
         phi_unc = endpoint_phase_echt(
             x_noisy, F0, SFREQ, bw=BW_DEFAULT, order=2, calibrate=False
@@ -516,13 +516,13 @@ def _snr_one_point(args):
         float(errs_cal.std(ddof=0)),
     )
 
-def compute_snr_sweep(seed, print_every=50):
+def compute_snr_sweep(seed, print_every=10):
     rng = np.random.default_rng(seed)
     snr_db_list = np.linspace(-10, 20, SNR_STEPS)
 
     n_cycles = N_CYCLES
     _, x_clean, true_phase_end = generate_cosine_window(
-        n_cycles, F0, SFREQ, phi0=0.0
+        n_cycles, F0, SFREQ, phi0=0
     )
     signal_power = float(np.mean(x_clean ** 2))
 
@@ -536,7 +536,7 @@ def compute_snr_sweep(seed, print_every=50):
     total = len(task_args)
     results = [None] * total  # pre-allocate to preserve order
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+    with ProcessPoolExecutor(max_workers=int(3/4 * N_WORKERS)) as ex:
         futures = {ex.submit(_snr_one_point, arg): i for i, arg in enumerate(task_args)}
 
         for completed, fut in enumerate(as_completed(futures), start=1):
@@ -583,15 +583,15 @@ def plot_snr_sweep(ax, r):
         color=line_mu_cal.get_color(), alpha=0.18,
     )
 
-    ax.set_xlabel(r"Input SNR (dB)")
+    ax.set_xlabel(r"Input SNR [dB]")
     ax.set_ylabel(r"$|$phase error$|$ $[^\circ]$")
     ax.set_ylim(0.8 * min(mean_cal), 1.2 * max(mean_unc))
     ax.grid(True, linestyle=":", which="both", axis="both",)
     ax.set_axisbelow(True)
 
 # Chirp robustness
-def generate_detuned_cosine(n_cycles, f0, sfreq, delta_frac=0.0, phi0=0.0):
-    f_sig = f0 * (1.0 + delta_frac)
+def generate_detuned_cosine(n_cycles, f0, sfreq, delta_frac=0, phi0=0):
+    f_sig = f0 * (1 + delta_frac)
 
     duration = n_cycles / f0
     n_samples = int(duration * sfreq)
@@ -819,7 +819,7 @@ def plot_filter_type(ax, r):
     # Annotate Cheby II uncalibrated height on its clipped bar
     if idx_out is not None:
         bar_out = bars_unc[idx_out]
-        x_out = bar_out.get_x() + 1.1*bar_out.get_width() / 2.0
+        x_out = bar_out.get_x() + 1.1*bar_out.get_width() / 2
         val_out = mean_unc[idx_out]
 
         ax.text(
@@ -837,7 +837,7 @@ def main(output_prefix="../results/ecHT_simulations"):
     set_mpl_style()
     seed = 0
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+    with ProcessPoolExecutor(max_workers=int(N_WORKERS/4)) as ex:
         futures = [
             ex.submit(compute_window_length_sweep),  # 0
             ex.submit(compute_bandwidth_sweep),  # 1
