@@ -18,8 +18,9 @@ Schreglmann, S. R., Wang, D., Peach, R. L., Li, J., Zhang, X.,
        Nature communications, 12(1), 363.
 """
 
+from functools import lru_cache
 import numpy as np
-from scipy.signal import butter, bessel, cheby1, cheby2, ellip, freqz
+from scipy.signal import butter, bessel, cheby1, cheby2, ellip, sosfreqz
 from scipy.fft import fft, ifft, fftshift, ifftshift, next_fast_len
 
 
@@ -103,6 +104,7 @@ class ECHT:
     # Internal helpers
     # ------------------------------------------------------------------
     @staticmethod
+    @lru_cache(maxsize=None)
     def _design_bandpass(l_freq, h_freq, sfreq, filt_order, n_fft, filter_type="butter"):
         """
         Construct Hilbert multiplier and centered band-pass frequency response.
@@ -134,22 +136,22 @@ class ECHT:
         Wn = [l_freq / (sfreq / 2), h_freq / (sfreq / 2)]
 
         if filter_type == "butter":
-            b, a = butter(filt_order, Wn, btype="band")
+            sos = butter(filt_order, Wn, btype="band", output='sos')
         elif filter_type == "bessel":
-            b, a = bessel(filt_order, Wn, btype="band", norm="phase")
+            sos = bessel(filt_order, Wn, btype="band", norm="phase", output='sos')
         elif filter_type == "cheby1":
-            b, a = cheby1(filt_order, 1, Wn, btype="band")  # 1 dB ripple
+            sos = cheby1(filt_order, 1, Wn, btype="band", output='sos')  # 1 dB ripple
         elif filter_type == "cheby2":
-            b, a = cheby2(filt_order, 40, Wn, btype="band")  # 40 dB stopband
+            sos = cheby2(filt_order, 40, Wn, btype="band", output='sos')  # 40 dB stopband
         elif filter_type == "ellip":
-            b, a = ellip(filt_order, 1, 40, Wn, btype="band")  # elliptic / Cauer
+            sos = ellip(filt_order, 1, 40, Wn, btype="band", output='sos')  # elliptic / Cauer
         else:
             raise ValueError(f"Unknown filter_type: {filter_type}")
 
         # Centered frequency grid (Hz), length n_fft
         filt_freq = np.fft.fftshift(np.fft.fftfreq(n_fft, d=1 / sfreq))
 
-        _, H_center = freqz(b, a, worN=filt_freq, fs=sfreq)
+        _, H_center = sosfreqz(sos, worN=filt_freq, fs=sfreq)
 
         return h, H_center
 
