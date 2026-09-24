@@ -1,16 +1,7 @@
 """
-ecHT vs HT Infographic
-======================
-
 Create a compact multi-panel infographic comparing the standard Hilbert
 Transform (HT) analytic signal to the Endpoint-Corrected Hilbert Transform
 (ecHT) analytic signal.
-
-Outputs
--------
-Two files are written:
-- ecHT_vs_HT_infographic.png
-- ecHT_vs_HT_infographic.pdf
 """
 
 import numpy as np
