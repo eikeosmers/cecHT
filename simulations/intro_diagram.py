@@ -72,10 +72,6 @@ def make_infographic(
     use_tex : bool
         If True, use LaTeX rendering in Matplotlib.
 
-    Returns
-    -------
-    None
-        Writes ``{save_base}.png`` and ``{save_base}.pdf``.
     """
     # Signal: finite window extracted from a longer cosine
     n_samples = int(round(n_cycles * sfreq / f0))
