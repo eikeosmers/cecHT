@@ -19,7 +19,7 @@ We compute endpoint analytic-signal errors for:
 2) Calibrated ecHT (using theoretical C_opt gain)
 
 Typical outcomes (Schreglmann et al. 2021):
-    phase error      = (7 pm 2)°
+    phase error      = (9 pm 2)°
     amplitude error  = (4 pm 2)%
 """
 
