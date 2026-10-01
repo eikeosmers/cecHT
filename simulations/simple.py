@@ -29,7 +29,7 @@ from utils import _wrap_phase
 
 
 def schreglmann(
-    sfreq = 373,
+    sfreq = 256,
     duration = 1,
     f_min = 2,
     f_max = 3,
