@@ -158,10 +158,6 @@ class ECHT(_ECHT):
         self.l_freq = l_freq
         self.h_freq = h_freq
 
-        # Keep BW updated (when tracking uses a fixed bandwidth)
-        if self.bandpass_bw_hz is not None:
-            self.bandpass_bw_hz = float(self.h_freq - self.l_freq)
-
         # Recompute frequency-domain responses for the new bandpass
         self.h_, H_center = self._design_bandpass(
             l_freq=self.l_freq,
@@ -190,7 +186,9 @@ class ECHT(_ECHT):
         # Decide BW (fixed) and clamp edges
         bw = self.bandpass_bw_hz
         if bw is None:
-            bw = float(self.h_freq - self.l_freq)
+            raise RuntimeError(
+                "bandpass_bw_hz is unresolved; call fit() before tracking."
+            )
 
         nyq = 0.5 * float(self.sfreq)
         fmin = float(self.bandpass_min_hz)
@@ -267,7 +265,6 @@ class ECHT(_ECHT):
         state (bandwidth inference, caches).
         """
         X = np.asarray(X)
-        self._fit_N_ = int(X.shape[0])
 
         # If tracking needs a bandwidth and none was specified, infer it once
         if self.bandpass_bw_hz is None and self.l_freq is not None and self.h_freq is not None:
@@ -292,20 +289,22 @@ class ECHT(_ECHT):
         if f0_used is not None:
             self._update_bandpass_for_f0(float(f0_used))
 
-        return super().transform(X, f0=f0)
+        return super().transform(X, f0=f0_used)
 
-    def _apply_calibration(self, Xf, **kwargs):
+    def _apply_calibration(self, Xf, n_samples=None, **kwargs):
         if not self.calibrate:
             return Xf
 
-        f0_val = kwargs.get('f0', self.f0)
-        n_samples = Xf.shape[0]
+        f0_val = kwargs.get('f0')
+        if f0_val is None:
+            f0_val = self.f0
+
+        # n_samples = Xf.shape[0]
+        if n_samples is None:
+            n_samples = Xf.shape[0]
 
         gain, _ = self._calib_gain_lut(f0_val, n_samples)
-        if gain is not None:
-            return Xf * gain
-
-        return Xf
+        return Xf * gain if gain is not None else Xf
 
     def fit_transform(self, X, y=None):
         return self.fit(X).transform(X)
