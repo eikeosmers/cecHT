@@ -36,15 +36,16 @@ from helpers import (
     aggregate_and_save,
 )
 
-_CSV_PATH = "../results/phase_error_per_file.csv"
-_NPZ_PATH = "../results/phase_error_all.npz"
-_IAF_CSV  = "../results/iaf_per_segment.csv"
+_CSV_PATH = "phase_error_per_file.csv"
+_NPZ_PATH = "phase_error_all.npz"
+_IAF_CSV  = "iaf_per_segment.csv"
+_SUBJ_CSV = "phase_error_per_subject.csv"
 _N_JOBS   = -1
 
 
 def main(
     dataset,
-    iaf_window=10.0,
+    iaf_window=10,
     conditions=None,
     bw_factor=0.5,
     filt_order=1,
@@ -53,6 +54,7 @@ def main(
     csv_path=_CSV_PATH,
     npz_path=_NPZ_PATH,
     iaf_csv_path=_IAF_CSV,
+    subj_csv_path=_SUBJ_CSV
 ):
     if dataset == "hmc":
         if edf_dir is None:
@@ -82,7 +84,10 @@ def main(
     for r in results:
         print(f"  {r['seg_id']}: {r['reason'] or 'OK'}")
 
-    aggregate_and_save(results, csv_path, npz_path, iaf_csv_path)
+    # aggregate_and_save(results, csv_path, npz_path, iaf_csv_path)
+
+    aggregate_and_save(results, csv_path, npz_path, iaf_csv_path,
+                   subj_csv_path=subj_csv_path)
 
 
 if __name__ == "__main__":
@@ -94,9 +99,7 @@ if __name__ == "__main__":
                    # default = "hmc")
     p.add_argument("--iaf-window", type=float, default=10,
                    help="IAF estimation window (s). <=0 -> full segment. (default: 10)")
-    p.add_argument("--subjects", type=int, default=None,
-                   help="Max number of subjects (default: all).")
-    p.add_argument("--conditions", nargs="*", default="EC",
+    p.add_argument("--conditions", nargs="*", default=["EC"],
                    help="Conditions to include, e.g. EC EO (Rodrigues2017 only).")
     p.add_argument("--bw", type=float, default=0.5,
                    help="Bandwidth factor: f0 ± bw*f0/2 (default: 0.5).")
