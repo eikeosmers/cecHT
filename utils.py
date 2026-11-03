@@ -1,355 +1,371 @@
+"""
+Tremor ecHT plot w/ tracked f0:
+(A) Uncalibrated phase error distribution (polar)
+(B) Calibrated phase error distribution (polar)
+(C) Mean phase error vs tremor-frequency CV per trial (paired points + regressions)
+"""
+
+import argparse
+from pathlib import Path
+from functools import partial
+
 import numpy as np
-import matplotlib as mpl
+from scipy.io import loadmat
 from scipy.stats import circmean, circstd
-import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
-from matplotlib.lines import Line2D
+from scipy.signal import hilbert, butter, sosfiltfilt, sosfilt, sosfilt_zi, welch
+
+from joblib import Parallel, delayed
+
+from phase_track import ECHT
+from utils import _wrap_phase, make_figure, run_echt_window_loop
 
 
-# Global style
-mpl.rcParams.update({
-    "font.family": "serif",
-    "font.size": 7,
-    "axes.labelsize": 7,
-    "axes.titlesize": 7,
-    "legend.fontsize": 7,
-    "xtick.labelsize": 7,
-    "ytick.labelsize": 7,
-    "lines.linewidth": 1.0,
-    "figure.dpi": 300,
-    "text.usetex": True,
-})
+def _estimate_f0(seg, fs, f_min, f_max, interpolate=False):
+    # Estimate dominant frequency in [f_min, f_max]
 
-# Color palette
-BLUE   = "#4E79A7"
-ORANGE = "#F28E2B"
-RED    = "#E15759"
-GREEN  = "#59A14F"
-YELLOW = "#EDC948"
-PURPLE = "#B07AA1"
-TEAL   = "#76B7B2"
+    x = seg.ravel()
+    X = np.fft.rfft(x)
+    freqs = np.fft.rfftfreq(x.size, d=1/fs)
 
-COL_HT   = ORANGE
-COL_ECHT = BLUE
+    band = (freqs >= f_min) & (freqs <= f_max)
 
-COMMON_BBOX = dict(
-    facecolor="white",
-    edgecolor="0.8",
-    boxstyle="round,pad=0.2",
-    alpha=0.85,
-)
+    if not np.any(band):
+        return np.nan
 
-# Circular helpers
-def _wrap_phase(phi):
-    """Wrap phase to [-pi, pi]."""
-    return (phi + np.pi) % (2 * np.pi) - np.pi
+    mag = np.abs(X[band])
+    if mag.size < 3:
+        return np.nan
 
-def _angle_diff(phi1, phi2):
-    """Smallest signed difference phi1 - phi2 in [-pi, pi]."""
-    return _wrap_phase(phi1 - phi2)
+    k0 = int(np.argmax(mag))
+    freqs_b = freqs[band]
 
-def _wmean_angle(mu, w):
-    """Weighted circular mean (radians)."""
-    v = np.sum(w * np.exp(1j * mu))
-    return float(np.angle(v))
+    # Parabolic interpolation around the peak
+    if interpolate:
+        if 0 < k0 < (mag.size - 1):
+            y1, y2, y3 = mag[k0 - 1], mag[k0], mag[k0 + 1]
+            denom = (y1 - 2*y2 + y3)
+            if denom != 0:
+                delta = 0.5*(y1-y3)/denom  # in bins
+                bin_hz = freqs_b[1] - freqs_b[0]
+                return freqs_b[k0] + delta * bin_hz
 
+    return freqs_b[k0]
 
-def _circ_stats(phi_rad):
+# Tremor frequency CV
+def _calc_cv(x_filt, freq_win_len, freq_stride, L, fs):
+    freqs_win = []
+    if L >= freq_win_len:
+        for start in range(0, L - freq_win_len + 1, freq_stride):
+            seg_f = x_filt[start:start + freq_win_len]
+            freqs, psd = welch(seg_f, fs=fs, nperseg=min(len(seg_f), freq_win_len))
+            mask = (freqs >= 0.5) & (freqs <= 20)
+            if not np.any(mask):
+                continue
+            psd_masked = psd[mask]
+            if psd_masked.size == 0:
+                continue
+            freqs_win.append(freqs[mask][np.argmax(psd_masked)])
+
+    if len(freqs_win) >= 2:
+        freqs_win = np.asarray(freqs_win, dtype=float)
+        mean_f = np.mean(freqs_win)
+        std_f = np.std(freqs_win, ddof=1)
+        freq_cv = (std_f / mean_f) if mean_f != 0 else np.nan
+    else:
+        freq_cv = np.nan
+
+    return freq_cv
+
+def process_one_trial(
+    x,
+    phi_ds,
+    fs,
+    f0,
+    N=256,
+    filt_order=2,
+    freq_win_len=2048,
+    freq_stride=2048,
+    track_f0=True,
+):
     """
+    track_f0
+        If True, f0 is updated online during the window loop using
+        the last estimate (tracking mode).
+        If False, f0 is held fixed throughout (static mode).
+
     Returns:
-        mu, sd, plv, pli
+      err_unc, err_cal             : per-window endpoint errors (paired)
+      freq_cv                      : trial tremor frequency CV
+      trial_abs_unc, trial_abs_cal : per-trial mean |error| (rad)
+      trial_mu_unc, trial_mu_cal   : per-trial circular mean error (rad)
+      n_windows                    : number of windows
     """
-    phi = np.asarray(phi_rad, float)
-    if phi.size == 0:
-        return np.nan, np.nan, np.nan, np.nan
 
-    mu = float(circmean(phi, high=np.pi, low=-np.pi))
-    sd = float(circstd(phi, high=np.pi, low=-np.pi))
-    plv = float(np.abs(np.mean(np.exp(1j * phi))))
-    pli = float(np.abs(np.mean(np.sign(np.sin(phi)))))
+    if len(x) < N:
+        return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
 
-    return mu, sd, plv, pli
+    l_freq = max(0.1, f0 - f0/2)
+    h_freq = min(0.5*fs - 0.1, f0 + f0/2)
+    if not (0 < l_freq < h_freq < 0.5 * fs):
+        return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
+
+    sos = butter(filt_order, [l_freq, h_freq], fs=fs, btype="bandpass", output="sos")
+
+    # offline reference: non-causal filter
+    x_filt = sosfiltfilt(sos, x)
+    z_offline = hilbert(x_filt)
+    phi_offline = np.angle(z_offline) # baseline, offline filtered
+
+    L = min(len(x), len(phi_offline), len(phi_ds))
+    x = x[:L]
+    phi_offline = phi_offline[:L]
+
+    # online causal filter: initialise state from first sample
+    zi = sosfilt_zi(sos) * x[0]
+    x_filt_online, zi = sosfilt(sos, x, zi=zi)  # filter entire trial causally
+
+    first_seg = x[:N]
+
+    echt_unc = ECHT(
+        l_freq=l_freq, h_freq=h_freq, sfreq=fs, filt_order=filt_order,
+        calibrate=False, f0=None,
+        bandpass_tracking=False, bandpass_update_mode="threshold"
+    )
+    echt_unc.fit(first_seg)
+
+    echt_cal = ECHT(
+        l_freq=l_freq, h_freq=h_freq, sfreq=fs, filt_order=filt_order,
+        calibrate=True, f0=f0,
+        bandpass_tracking=track_f0, bandpass_update_mode="threshold"
+    )
+    echt_cal.fit(first_seg)
+
+    out_len = L - (N - 1)
+    if out_len <= 0:
+        return (np.array([]), np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan, 0)
+
+    # Build per-sample f0 sequence (for tracking mode) or use None (static)
+    if track_f0:
+        f0_seq = np.full(L, f0, dtype=float)
+        f0_track = f0
+        last_f0_hat = np.nan
+        f_min = max(0.1, f0 - 0.5 * f0)
+        f_max = min(0.5 * fs - 0.1, f0 + 0.5 * f0)
+        for end_idx in range(N - 1, L):
+            if ((end_idx - (N - 1)) % freq_stride) == 0:
+                start_f0 = max(0, end_idx - freq_win_len + 1)
+                last_f0_hat = _estimate_f0(
+                    x_filt_online[start_f0:end_idx + 1], fs, f_min, f_max
+                )
+            if np.isfinite(last_f0_hat):
+                f0_track = last_f0_hat
+            f0_seq[end_idx] = f0_track
+    else:
+        f0_seq = None
+
+    err_unc, err_cal = run_echt_window_loop(
+        x, phi_offline, echt_unc, echt_cal, N, f0_seq=f0_seq
+    )
+
+    trial_abs_unc = np.mean(np.abs(err_unc))
+    trial_abs_cal = np.mean(np.abs(err_cal))
+    trial_mu_unc = circmean(err_unc, high=np.pi, low=-np.pi)
+    trial_mu_cal = circmean(err_cal, high=np.pi, low=-np.pi)
+    n_windows = int(err_unc.size)
+
+    freq_cv = _calc_cv(x_filt_online, freq_win_len, freq_stride, L, fs)
+
+    return (err_unc, err_cal, freq_cv, trial_abs_unc, trial_abs_cal, trial_mu_unc, trial_mu_cal, n_windows)
 
 
-def _p_value_text(p, decimals=4):
-    """Pretty LaTeX-formatted p-value."""
-    if not np.isfinite(p):
-        return "p = n/a"
+def iter_trials(mat_path):
+    mat = loadmat(mat_path, squeeze_me=True, struct_as_record=False)
+    data_all_res = mat["data_all_res"]
 
-    threshold = 10 ** (-decimals)
-    if p < threshold:
-        n = int(np.ceil(-np.log10(p)))
-        return rf"$p < 10^{{-{n}}}$"
-    return rf"$p = {p:.{decimals}f}$"
+    for subj in np.ravel(data_all_res):
+        for cond in np.ravel(subj):
+            if cond is None:
+                continue
+            for trial in np.ravel(cond):
+                if trial is None:
+                    continue
+                if not hasattr(trial, "ADC_in_raw") or trial.ADC_in_raw is None:
+                    continue
 
-# Permutation test (paired, circular)
-def circular_permutation_test_paired(
-    mu_a,
-    mu_b,
-    weights,
-    n_perm=5000,
-    seed=0,
+                x = np.asarray(trial.ADC_in_raw, dtype=float).ravel()
+                if x.size < 10:
+                    continue
+
+                dt_mean = np.asarray(trial.dt_mean).squeeze()
+                fs = 1/dt_mean
+                f0 = np.asarray(trial.cal_freq).squeeze()
+
+                phi_ds = np.asarray(trial.ADC_in_phase, dtype=float).ravel()
+
+                L = min(len(x), len(phi_ds))
+                yield x[:L], phi_ds[:L], fs, f0
+
+
+def collect_trials(mat_paths):
+    all_trials = []
+    for mat_path in mat_paths:
+        mat_path = Path(mat_path)
+        if not mat_path.exists():
+            print(f"File not found, skipping: {mat_path}")
+            continue
+        this_trials = list(iter_trials(mat_path))
+        print(f"Collected {len(this_trials)} trials from {mat_path.name}")
+        all_trials.extend(this_trials)
+    return all_trials
+
+
+def compute_endpoint_errors(
+    trials,
+    process_fn=process_one_trial,
+    filt_order=2,
+    N=256,
+    n_jobs=-1,
+    freq_win_len=2048,
+    freq_stride=2048,
 ):
-    """
-    Paired circular permutation test using within-recording label swaps.
-    Returns (T_obs_deg, p_value).
-    """
-    mu_a = np.asarray(mu_a, float)
-    mu_b = np.asarray(mu_b, float)
-    w = np.asarray(weights, float)
-
-    mask = np.isfinite(mu_a) & np.isfinite(mu_b) & np.isfinite(w) & (w > 0)
-    mu_a, mu_b, w = mu_a[mask], mu_b[mask], w[mask]
-
-    if mu_a.size < 2:
-        return np.nan, np.nan
-
-    def T(mua, mub):
-        da = _wmean_angle(mua, w)
-        db = _wmean_angle(mub, w)
-        return abs(_wrap_phase(da - db))
-
-    T_obs = T(mu_a, mu_b)
-
-    rng = np.random.default_rng(seed)
-    swaps = rng.random((n_perm, mu_a.size)) < 0.5
-
-    exceed = 0
-    for s in swaps:
-        mua = np.where(s, mu_b, mu_a)
-        mub = np.where(s, mu_a, mu_b)
-        if T(mua, mub) >= T_obs - 1e-15:
-            exceed += 1
-
-    p = (exceed + 1) / (n_perm + 1)
-    return float(np.degrees(T_obs)), float(p)
-
-
-def run_echt_window_loop(x, ref_phase, echt_unc, echt_cal, win_len,
-                         f0_seq=None):
-    """Sliding-window ecHT phase-error loop shared by EEG and tremor pipelines.
-
-    Parameters
-    ----------
-    x         : 1-D array  (signal)
-    ref_phase : 1-D array  (acausal reference phase in radians, len == len(x))
-    echt_unc, echt_cal : fitted ECHT instances
-    win_len   : int
-    f0_seq    : 1-D array | None
-        Per-sample f0 values passed to transform (tremor tracking mode).
-        None → f0 argument is omitted (EEG / static mode).
-
-    Returns
-    -------
-    err_unc, err_cal : 1-D float arrays of phase errors (radians)
-    """
-    n = len(x)
-    n_out = n - (win_len - 1)
-    err_unc = np.empty(n_out, dtype=float)
-    err_cal = np.empty(n_out, dtype=float)
-
-    for k, end_idx in enumerate(range(win_len - 1, n)):
-        seg = x[end_idx - win_len + 1 : end_idx + 1]
-        f0_kw = {} if f0_seq is None else {"f0": f0_seq[end_idx]}
-        zu = np.squeeze(echt_unc.transform(seg, **f0_kw))
-        zc = np.squeeze(echt_cal.transform(seg, **f0_kw))
-        err_unc[k] = _wrap_phase(np.angle(zu[-1]) - ref_phase[end_idx])
-        err_cal[k] = _wrap_phase(np.angle(zc[-1]) - ref_phase[end_idx])
-
-    return err_unc, err_cal
-
-# Plot helpers
-def _style_polar_axis(ax, r_max, radial_ticks):
-    ax.set_theta_zero_location("N")
-    ax.set_theta_direction(-1)
-    ax.set_thetagrids(np.arange(0, 360, 45), labels=[""] * 8)
-
-    ax.set_ylim(0, r_max)
-    ax.set_yticks(radial_ticks)
-    ax.set_yticklabels([rf"{t:.0f}\%" for t in radial_ticks])
-
-    ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
-    ax.spines["polar"].set_linewidth(0.8)
-    ax.set_rlabel_position(90)
-
-    for label in ax.get_yticklabels():
-        label.set_horizontalalignment("center")
-
-    r0 = r_max * 1.175
-    ax.text(np.deg2rad(45),  r0, r"$+45^\circ$", ha="center", va="center")
-    ax.text(np.deg2rad(-45), r0, r"$-45^\circ$", ha="center", va="center")
-
-
-def _style_cart_axis(ax):
-    ax.grid(True, alpha=0.3, linewidth=0.5)
-    for spine in ax.spines.values():
-        spine.set_linewidth(0.8)
-        spine.set_color("0.2")
-
-def make_figure(
-    err_unc_rad,
-    err_cal_rad,
-    trial_freq_cv,
-    trial_abs_unc_rad,
-    trial_abs_cal_rad,
-    trial_mu_unc,
-    trial_mu_cal,
-    trial_nwin,
-    save_base="tremor_echt_summary",
-    n_perm=5000,
-    perm_seed=0,
-    panel_c_xlabel="Tremor frequency CV",
-    panel_c_title=r"$\mathbf{c}$ Phase error vs. tremor variability",
-):
-    # stats
-    mu_u, sd_u, plv_u, pli_u = _circ_stats(err_unc_rad)
-    mu_c, sd_c, plv_c, pli_c = _circ_stats(err_cal_rad)
-
-    # paired circular permutation test
-    _, p_perm = circular_permutation_test_paired(
-        mu_a=trial_mu_unc,
-        mu_b=trial_mu_cal,
-        weights=trial_nwin,
-        n_perm=n_perm,
-        seed=perm_seed,
-    )
-    p_txt = _p_value_text(p_perm)
-
-    # histogram prep
-    bin_width_deg = 10
-    bin_width_rad = np.radians(bin_width_deg)
-    bins = np.arange(-180, 181, bin_width_deg)
-    centers = (np.radians(bins[:-1]) + np.radians(bins[1:])) / 2
-
-    err_unc_deg = np.degrees(_wrap_phase(err_unc_rad))
-    err_cal_deg = np.degrees(_wrap_phase(err_cal_rad))
-
-    pu = np.histogram(err_unc_deg, bins=bins)[0] / max(1, err_unc_deg.size) * 100
-    pc = np.histogram(err_cal_deg, bins=bins)[0] / max(1, err_cal_deg.size) * 100
-
-    r_max = max(pu.max(), pc.max()) * 1.05
-    r_max = max(r_max, 5)
-    r_ticks = [t for t in [10, 20, 30] if t < r_max]
-
-    # layout
-    fig = plt.figure(figsize=(7.0, 2.4))
-    gs = fig.add_gridspec(
-        1, 3,
-        width_ratios=[1.0, 1.0, 1.2],
-        height_ratios=[1.0],
-        wspace=0.3,
+    results = Parallel(n_jobs=n_jobs, backend="loky")(
+        delayed(process_fn)(
+            x, phi_ds, fs, f0, N, filt_order, freq_win_len, freq_stride
+        )
+        for (x, phi_ds, fs, f0) in trials
     )
 
-    axA = fig.add_subplot(gs[0, 0], projection="polar")
-    axB = fig.add_subplot(gs[0, 1], projection="polar")
-    axC = fig.add_subplot(gs[0, 2])
+    err_unc_all = []
+    err_cal_all = []
 
-    # Panel A
-    axA.bar(centers, pu, width=bin_width_rad, color=COL_HT, edgecolor="0", linewidth=0.75)
-    axA.plot([mu_u, mu_u], [0, r_max], color="0", linewidth=2)
-    _style_polar_axis(axA, r_max, r_ticks)
-    axA.text(
-        0.5, 0.45,
-        rf"${np.round(np.degrees(mu_u), 1) + 0.0:.1f}^\circ \pm {np.round(np.degrees(sd_u), 1):.1f}^\circ$" "\n"
-        rf"PLV$\uparrow$: {plv_u:.3f}" "\n"
-        rf"PLI$\downarrow$: {pli_u:.3f}",
-        transform=axA.transAxes, bbox=COMMON_BBOX, va="top", ha="center"
+    trial_freq_cv = []
+    trial_abs_unc = []
+    trial_abs_cal = []
+    trial_mu_unc = []
+    trial_mu_cal = []
+    trial_nwin = []
+
+    n_windows_total = 0
+
+    for eu, ec, cv, absu, absc, muu, muc, nwin in results:
+        if eu.size and ec.size:
+            if eu.size != ec.size:
+                m = min(eu.size, ec.size)
+                eu = eu[:m]
+                ec = ec[:m]
+                nwin = m
+            err_unc_all.append(eu)
+            err_cal_all.append(ec)
+            n_windows_total += int(eu.size)
+
+        trial_freq_cv.append(cv)
+        trial_abs_unc.append(absu)
+        trial_abs_cal.append(absc)
+        trial_mu_unc.append(muu)
+        trial_mu_cal.append(muc)
+        trial_nwin.append(nwin)
+
+    err_unc_all = np.concatenate(err_unc_all) if err_unc_all else np.array([], dtype=float)
+    err_cal_all = np.concatenate(err_cal_all) if err_cal_all else np.array([], dtype=float)
+
+    trial_freq_cv = np.asarray(trial_freq_cv, dtype=float)
+    trial_abs_unc = np.asarray(trial_abs_unc, dtype=float)
+    trial_abs_cal = np.asarray(trial_abs_cal, dtype=float)
+    trial_mu_unc = np.asarray(trial_mu_unc, dtype=float)
+    trial_mu_cal = np.asarray(trial_mu_cal, dtype=float)
+    trial_nwin = np.asarray(trial_nwin, dtype=int)
+
+    print(f"compute_endpoint_errors: {n_windows_total} ecHT windows total")
+
+    return (
+        err_unc_all, err_cal_all,
+        trial_freq_cv,
+        trial_abs_unc, trial_abs_cal,
+        trial_mu_unc, trial_mu_cal,
+        trial_nwin
     )
 
-    # Panel B
-    axB.bar(centers, pc, width=bin_width_rad, color=COL_ECHT, edgecolor="0", linewidth=0.75)
-    axB.plot([mu_c, mu_c], [0, r_max], color="0", linewidth=2)
-    _style_polar_axis(axB, r_max, r_ticks)
-    axB.text(
-        0.5, 0.45,
-        rf"${np.round(np.degrees(mu_c), 1) + 0.0:.1f}^\circ \pm {np.round(np.degrees(sd_c), 1):.1f}^\circ$" "\n"
-        rf"PLV$\uparrow$: {plv_c:.3f}" "\n"
-        rf"PLI$\downarrow$: {pli_c:.3f}",
-        transform=axB.transAxes, bbox=COMMON_BBOX, va="top", ha="center"
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--track", action="store_true", default=True,
+                        help="Use f0-tracking mode (tremor_echt_track behaviour)")
+    args = parser.parse_args()
+
+    track_f0 = args.track
+    if track_f0:
+        print("Tracking enabled")
+    else:
+        print("Tracking disabled")
+
+    mat_paths = [
+        "data_sbj_original_2016.mat",
+        # "data_sbj_repeated_2019.mat",
+        # "data_sbj_new_2019.mat",
+    ]
+
+    print("Using the following .mat files (non-existing ones will be skipped):")
+    for p in mat_paths:
+        print("  -", p)
+
+    trials = collect_trials(mat_paths)
+    print(f"Total trials collected from all selected files: {len(trials)}")
+
+    if len(trials) == 0:
+        print("No trials found. Check that the .mat files exist and have the expected structure.")
+        return
+
+    filt_order = 2
+    N = 128
+
+    process_fn = process_one_trial
+    if not track_f0:
+        process_fn = partial(process_one_trial, track_f0=False)
+    (
+        err_unc, err_cal,
+        trial_freq_cv,
+        trial_abs_unc, trial_abs_cal,
+        trial_mu_unc, trial_mu_cal,
+        trial_nwin,
+    ) = compute_endpoint_errors(
+        trials,
+        process_fn=process_fn,
+        filt_order=filt_order,
+        N=N,
+        n_jobs=-1,
+        freq_win_len=2048,
+        freq_stride=2048,
     )
 
-    # Panel C
-    mask = np.isfinite(trial_freq_cv) & np.isfinite(trial_abs_unc_rad) & np.isfinite(trial_abs_cal_rad)
-    x = trial_freq_cv[mask]
-    y_unc = np.degrees(trial_mu_unc[mask])
-    y_cal = np.degrees(trial_mu_cal[mask])
+    if err_unc.size == 0 or err_cal.size == 0:
+        print("No windows produced any errors (check N and trial lengths).")
+        return
 
-    for xi, yu, yc in zip(x, y_unc, y_cal):
-        axC.plot([xi, xi], [yu, yc], color="0.7", linewidth=0.8, zorder=1) # lines connecting each cal-unc recording
+    mean_unc = _wrap_phase(circmean(err_unc, high=np.pi, low=-np.pi))
+    std_unc = circstd(err_unc, high=np.pi, low=-np.pi)
+    mean_cal = _wrap_phase(circmean(err_cal, high=np.pi, low=-np.pi))
+    std_cal = circstd(err_cal, high=np.pi, low=-np.pi)
 
-    axC.scatter(x, y_unc, s=10, marker="X", facecolor=COL_HT, edgecolor="0", linewidth=0.5, zorder=2)
-    axC.scatter(x, y_cal, s=10, marker="o", facecolor=COL_ECHT, edgecolor="0", linewidth=0.5, zorder=3)
+    print("\nSummary of ecHT vs offline Hilbert reference")
+    print(f"Mean uncalibrated error (deg): {np.degrees(mean_unc):.2f} ± {np.degrees(std_unc):.2f}")
+    print(f"Mean calibrated error   (deg): {np.degrees(mean_cal):.2f} ± {np.degrees(std_cal):.2f}")
 
-    if x.size > 2:
-        xs = np.sort(x)
-        line_unc = axC.plot(
-            xs,
-            np.polyval(np.polyfit(x, y_unc, 1), xs),
-            color=COL_HT,
-            linewidth=1.2,
-            zorder=4,
-        )[0]
-        line_cal = axC.plot(
-            xs,
-            np.polyval(np.polyfit(x, y_cal, 1), xs),
-            color=COL_ECHT,
-            linewidth=1.2,
-            zorder=4,
-        )[0]
-
-        outline = [pe.Stroke(linewidth=2.2, foreground="black"), pe.Normal()]
-        line_unc.set_path_effects(outline)
-        line_cal.set_path_effects(outline)
-
-    _style_cart_axis(axC)
-    axC.set_xlabel(panel_c_xlabel)
-    axC.set_ylabel(r"Mean phase error $[^\circ]$")
-    axC.yaxis.set_label_coords(-0.18, 0.5)
-
-    fig.tight_layout()
-
-    # force panel C to match polar panels' height
-    bboxA = axA.get_position()
-    bboxB = axB.get_position()
-
-    top = max(bboxA.y1, bboxB.y1) + 0.06
-    bottom = max(bboxA.y0, bboxB.y0)
-    height = top - bottom
-
-    bboxC = axC.get_position()
-    axC.set_position([bboxC.x0, bottom, bboxC.width, height])
-
-    # headings
-    bbA, bbB, bbC = axA.get_position(), axB.get_position(), axC.get_position()
-    y_head = 0.92
-    fig.text(bbA.x0, y_head, r"$\mathbf{a}$ ecHT phase error", ha="left", va="top")
-    fig.text(bbB.x0, y_head, r"$\mathbf{b}$ cecHT phase error", ha="left", va="top")
-    fig.text(bbC.x0 - 0.02, y_head, panel_c_title, ha="left", va="top")
-
-    bbA, bbB, bbC = axA.get_position(), axB.get_position(), axC.get_position()
-    x1 = bbA.x0 + bbA.width / 2
-    x2 = bbB.x0 + bbB.width / 2
-    y = max(bbA.y1, bbB.y1) + 0.01
-    h = 0.05
-
-    fig.add_artist(Line2D(
-        [x1, x1, x2, x2],
-        [y, y + h, y + h, y],
-        transform=fig.transFigure,
-        color="black",
-        linewidth=0.9,
-    ))
-
-    fig.text(
-        (x1 + x2) / 2,
-        y - h + 0.04,
-        rf"{p_txt}",
-        ha="center",
-        va="bottom",
-        fontsize=7,
-        transform=fig.transFigure,
+    save_base = "tremor_track" if track_f0 else "tremor_echt"
+    make_figure(
+        err_unc_rad=err_unc,
+        err_cal_rad=err_cal,
+        trial_freq_cv=trial_freq_cv,
+        trial_abs_unc_rad=trial_abs_unc,
+        trial_abs_cal_rad=trial_abs_cal,
+        trial_mu_unc=trial_mu_unc,
+        trial_mu_cal=trial_mu_cal,
+        trial_nwin=trial_nwin,
+        save_base=save_base,
+        n_perm=int(1e5),
+        perm_seed=0,
+        panel_c_xlabel="Tremor frequency CV",
+        panel_c_title=r"$\mathbf{c}$ Phase error vs. tremor variability",
     )
 
-    fig.savefig(f"{save_base}.pdf", bbox_inches="tight")
-    fig.savefig(f"{save_base}.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
+
+if __name__ == "__main__":
+    main()
