@@ -18,7 +18,7 @@ import mne
 import numpy as np
 from scipy import stats
 from scipy.optimize import curve_fit
-from scipy.signal import butter, hilbert, savgol_filter, sosfiltfilt
+from scipy.signal import butter, hilbert, sosfiltfilt
 
 from phase import ECHT
 from utils import _circ_stats, run_echt_window_loop
@@ -29,11 +29,6 @@ IafResult = namedtuple(
     ["PeakAlphaFrequency", "CenterOfGravity", "AlphaBand",
      "delta_bic", "pink_r2"],
 )
-
-_DEFAULT_FMIN = 7.5
-_DEFAULT_FMAX = 14
-_EDGE_SEARCH_SG_WINDOW = 11
-_EDGE_SEARCH_SG_POLY = 3
 
 
 def _fit_fooof(freqs, psd, freq_range=(1, 30)):
@@ -121,7 +116,7 @@ def iaf(
     pink_max_r2:               Spectra with log-log R² above this are treated as pure 1/f.
 
     """
-    freq_range = [0.1, 30]
+    freq_range = [1, 30]
     n_fft = int(raw.info["sfreq"] / resolution)
     w_spec = raw.compute_psd(method="welch", picks=picks, n_fft=n_fft,
                              fmin=freq_range[0], fmax=freq_range[1])
@@ -152,9 +147,9 @@ def iaf(
     return IafResult(paf, cog, (fmin, fmax), delta_bic, pink_r2)
 
 
-def estimate_paf(data, info, fmin=7.5, fmax=14,
-                 segment_duration=6, polyorder=5, step=0.15):
-    """Estimate PAF as the median across sliding Savgol-IAF windows.
+def estimate_paf(data, info, fmin=8, fmax=12,
+                 segment_duration=6, step=0.17):
+    """Estimate PAF as the median across sliding windows.
 
     Parameters
     ----------
@@ -162,7 +157,6 @@ def estimate_paf(data, info, fmin=7.5, fmax=14,
     info
     fmin, fmax:         Alpha-band search edges (Hz).
     segment_duration:   Duration of each sub-window (s).
-    polyorder:          Savgol polynomial order.
     step:               Sliding step size (s).
     """
     raw_tmp = mne.io.RawArray(data[np.newaxis, :], info)
@@ -173,7 +167,7 @@ def estimate_paf(data, info, fmin=7.5, fmax=14,
     for tmin in np.arange(0, duration - segment_duration, step):
         seg = raw_tmp.copy().crop(tmin=tmin, tmax=tmin + segment_duration)
         res = iaf(seg, fmin=fmin, fmax=fmax,
-                         pink_max_r2=0.9, resolution=0.17)
+                         pink_max_r2=0.9, resolution=0.1805)
         if res.PeakAlphaFrequency is not None and res.PeakAlphaFrequency > 0:
             pafs.append(res.PeakAlphaFrequency)
 
@@ -346,6 +340,7 @@ def load_rodrigues2017(conditions=None, channel_name=None):
 
                 raw_pick.load_data()
                 full_data = raw_pick.get_data().squeeze()
+                assert full_data.ndim == 1, f"expected 1 channel, got {raw_pick.info['nchan']}"
                 full_info = raw_pick.info.copy()
                 fs = float(raw_pick.info["sfreq"])
 
@@ -391,8 +386,8 @@ def load_rodrigues2017(conditions=None, channel_name=None):
 
 
 # Per-segment processing
-def _fail(seg_id, reason):
-    return dict(seg_id=str(seg_id), ok=False, reason=reason,
+def _fail(seg_id, reason, subject=None):
+    return dict(seg_id=str(seg_id), subject=subject, ok=False, reason=reason,
                 phase_err_unc=None, phase_err_cal=None, iaf_segments=[])
 
 
@@ -408,7 +403,8 @@ def process_segment(seg, iaf_window=10, bw_factor=0.5, filt_order=1):
 
     """
     mne.set_log_level("ERROR")
-    sid = f"s{seg['subject']}_{seg.get('condition', '')}_b{seg.get('block_idx', 0)}"
+    subject = str(seg["subject"])
+    sid = f"s{subject}_{seg.get('condition', '')}_b{seg.get('block_idx', 0)}"
 
     try:
         x = seg["full_data"][seg["sample_start"]:seg["sample_end"]].copy()
@@ -425,7 +421,7 @@ def process_segment(seg, iaf_window=10, bw_factor=0.5, filt_order=1):
 
         n_iaf = int(min(x.size, round(fs * iaf_window))) if iaf_window > 0 else x.size
         if n_iaf < 10:
-            return _fail(sid, f"IAF window too short (N={n_iaf})")
+            return _fail(sid, f"segment too short (N={x.size})", subject)
 
         paf = estimate_paf(x[:n_iaf], info)
         if paf is None:
@@ -436,8 +432,13 @@ def process_segment(seg, iaf_window=10, bw_factor=0.5, filt_order=1):
             return _fail(sid, f"invalid window length ({win_len=}, N={x.size})")
 
         # Acausal reference on full recording, then slice
+        ref = seg["full_data"]
+        for sos in [butter(4, [1, 40], fs=fs, btype="band", output="sos"),
+                    butter(4, [46, 54], fs=fs, btype="stop", output="sos")]:
+            ref = sosfiltfilt(sos, ref)
+
         sos = butter(filt_order, [l_freq, h_freq], fs=fs, btype="band", output="sos")
-        ref = hilbert(sosfiltfilt(sos, seg["full_data"]))
+        ref = hilbert(sosfiltfilt(sos, ref))
         ref_seg = ref[seg["sample_start"]:seg["sample_end"]]
 
         pe_unc, pe_cal = echt_vs_hilbert(
@@ -446,19 +447,98 @@ def process_segment(seg, iaf_window=10, bw_factor=0.5, filt_order=1):
         )
 
         return dict(
-            seg_id=sid, ok=True, reason="",
+            seg_id=sid, subject=subject, ok=True, reason="",
             phase_err_unc=pe_unc, phase_err_cal=pe_cal,
             iaf_segments=[dict(segment_index=0, had_alpha=1, paf_hz=paf)],
         )
 
     except Exception as e:
-        return _fail(sid, f"error: {e}")
+        return _fail(sid, f"error: {e}", subject)
 
 
-def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
+# def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
+#     """Aggregate per-segment results, print summary, and write output files.
+#     """
+#     from collections import defaultdict
+#
+#     all_unc, all_cal, all_subj = [], [], []
+#     subj_unc, subj_cal = defaultdict(list), defaultdict(list)
+#     per_file_rows, iaf_rows = [], []
+#     no_alpha, errors = [], []
+#
+#     for r in results:
+#         if not r["ok"]:
+#             bucket = no_alpha if "no_alpha" in r["reason"] else errors
+#             bucket.append((r["seg_id"], r["reason"]))
+#             continue
+#
+#         iaf_rows.extend(
+#             dict(file=r["seg_id"], segment_index=s["segment_index"],
+#                  had_alpha=s["had_alpha"], paf_hz=s["paf_hz"])
+#             for s in r.get("iaf_segments", [])
+#         )
+#
+#         pe_unc, pe_cal = r["phase_err_unc"], r["phase_err_cal"]
+#         all_unc.append(pe_unc)
+#         all_cal.append(pe_cal)
+#
+#         m_u, s_u, plv_u, pli_u = _circ_stats(np.radians(pe_unc))
+#         m_c, s_c, plv_c, pli_c = _circ_stats(np.radians(pe_cal))
+#         per_file_rows.append(dict(
+#             file=r["seg_id"], n_samples=pe_unc.size,
+#             mean_unc_deg=np.degrees(m_u), std_unc_deg=np.degrees(s_u),
+#             plv_unc=plv_u, pli_unc=pli_u,
+#             mean_cal_deg=np.degrees(m_c), std_cal_deg=np.degrees(s_c),
+#             plv_cal=plv_c, pli_cal=pli_c,
+#         ))
+#
+#     print(f"\n=== Summary ===\n"
+#           f"  Total: {len(results)}   Valid: {len(all_unc)}   "
+#           f"No alpha: {len(no_alpha)}   Errors: {len(errors)}")
+#     for label, items in [("No alpha", no_alpha), ("Errors", errors)]:
+#         for path, reason in items:
+#             print(f"    [{label}] {path}: {reason}")
+#
+#     # IAF CSV
+#     with open(iaf_csv_path, "w", newline="") as f:
+#         w = csv.DictWriter(f, fieldnames=["file", "segment_index", "had_alpha", "paf_hz"])
+#         w.writeheader()
+#         w.writerows(iaf_rows)
+#     print(f"IAF estimates -> {iaf_csv_path}")
+#
+#     if not all_unc:
+#         print("No valid phase-error data.")
+#         return
+#
+#     # Per-file CSV
+#     fields = ["file", "n_samples",
+#               "mean_unc_deg", "std_unc_deg", "plv_unc", "pli_unc",
+#               "mean_cal_deg", "std_cal_deg", "plv_cal", "pli_cal"]
+#     with open(csv_path, "w", newline="") as f:
+#         w = csv.DictWriter(f, fieldnames=fields)
+#         w.writeheader()
+#         w.writerows(per_file_rows)
+#     print(f"Per-file stats  -> {csv_path}")
+#
+#     # Concatenated NPZ
+#     np.savez(npz_path,
+#              phase_err_unc_deg_all=np.concatenate(all_unc),
+#              phase_err_cal_deg_all=np.concatenate(all_cal))
+#     print(f"Phase errors    -> {npz_path}")
+
+
+def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path,
+                       subj_csv_path="../results/phase_error_per_subject.csv"):
     """Aggregate per-segment results, print summary, and write output files.
+
+    Subject-level circular statistics are computed from the POOLED
+    per-sample errors of each subject (one _circ_stats call over all of a
+    subject's samples) -- not by averaging the per-segment circular means.
     """
-    all_unc, all_cal = [], []
+    from collections import defaultdict
+
+    all_unc, all_cal, all_subj = [], [], []
+    subj_unc, subj_cal = defaultdict(list), defaultdict(list)
     per_file_rows, iaf_rows = [], []
     no_alpha, errors = [], []
 
@@ -468,8 +548,11 @@ def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
             bucket.append((r["seg_id"], r["reason"]))
             continue
 
+        subject = str(r.get("subject", r["seg_id"]))   # fallback for old results
+
         iaf_rows.extend(
-            dict(file=r["seg_id"], segment_index=s["segment_index"],
+            dict(file=r["seg_id"], subject=subject,
+                 segment_index=s["segment_index"],
                  had_alpha=s["had_alpha"], paf_hz=s["paf_hz"])
             for s in r.get("iaf_segments", [])
         )
@@ -477,11 +560,14 @@ def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
         pe_unc, pe_cal = r["phase_err_unc"], r["phase_err_cal"]
         all_unc.append(pe_unc)
         all_cal.append(pe_cal)
+        all_subj.append(np.full(pe_unc.size, subject))     # per-sample labels
+        subj_unc[subject].append(pe_unc)
+        subj_cal[subject].append(pe_cal)
 
         m_u, s_u, plv_u, pli_u = _circ_stats(np.radians(pe_unc))
         m_c, s_c, plv_c, pli_c = _circ_stats(np.radians(pe_cal))
         per_file_rows.append(dict(
-            file=r["seg_id"], n_samples=pe_unc.size,
+            file=r["seg_id"], subject=subject, n_samples=pe_unc.size,
             mean_unc_deg=np.degrees(m_u), std_unc_deg=np.degrees(s_u),
             plv_unc=plv_u, pli_unc=pli_u,
             mean_cal_deg=np.degrees(m_c), std_cal_deg=np.degrees(s_c),
@@ -490,14 +576,16 @@ def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
 
     print(f"\n=== Summary ===\n"
           f"  Total: {len(results)}   Valid: {len(all_unc)}   "
+          f"Subjects: {len(subj_unc)}   "
           f"No alpha: {len(no_alpha)}   Errors: {len(errors)}")
     for label, items in [("No alpha", no_alpha), ("Errors", errors)]:
         for path, reason in items:
             print(f"    [{label}] {path}: {reason}")
 
-    # IAF CSV
+    # IAF CSV (now carries subject id -> no regex needed downstream)
     with open(iaf_csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["file", "segment_index", "had_alpha", "paf_hz"])
+        w = csv.DictWriter(f, fieldnames=["file", "subject", "segment_index",
+                                          "had_alpha", "paf_hz"])
         w.writeheader()
         w.writerows(iaf_rows)
     print(f"IAF estimates -> {iaf_csv_path}")
@@ -506,8 +594,32 @@ def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
         print("No valid phase-error data.")
         return
 
-    # Per-file CSV
-    fields = ["file", "n_samples",
+    # ---- NEW: per-subject CSV, circular stats over ALL pooled samples ----
+    subj_rows = []
+    for subject in subj_unc:                    # dict preserves insertion order
+        unc = np.concatenate(subj_unc[subject])
+        cal = np.concatenate(subj_cal[subject])
+        m_u, s_u, plv_u, pli_u = _circ_stats(np.radians(unc))
+        m_c, s_c, plv_c, pli_c = _circ_stats(np.radians(cal))
+        subj_rows.append(dict(
+            subject=subject, n_segments=len(subj_unc[subject]),
+            n_samples=unc.size,
+            mean_unc_deg=np.degrees(m_u), std_unc_deg=np.degrees(s_u),
+            plv_unc=plv_u, pli_unc=pli_u,
+            mean_cal_deg=np.degrees(m_c), std_cal_deg=np.degrees(s_c),
+            plv_cal=plv_c, pli_cal=pli_c,
+        ))
+    subj_fields = ["subject", "n_segments", "n_samples",
+                   "mean_unc_deg", "std_unc_deg", "plv_unc", "pli_unc",
+                   "mean_cal_deg", "std_cal_deg", "plv_cal", "pli_cal"]
+    with open(subj_csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=subj_fields)
+        w.writeheader()
+        w.writerows(subj_rows)
+    print(f"Per-subject stats -> {subj_csv_path}")
+
+    # ---- Per-file CSV (gains a subject column) ----
+    fields = ["file", "subject", "n_samples",
               "mean_unc_deg", "std_unc_deg", "plv_unc", "pli_unc",
               "mean_cal_deg", "std_cal_deg", "plv_cal", "pli_cal"]
     with open(csv_path, "w", newline="") as f:
@@ -516,8 +628,9 @@ def aggregate_and_save(results, csv_path, npz_path, iaf_csv_path):
         w.writerows(per_file_rows)
     print(f"Per-file stats  -> {csv_path}")
 
-    # Concatenated NPZ
+    # ---- NPZ (gains per-sample subject labels, aligned with the errors) ----
     np.savez(npz_path,
              phase_err_unc_deg_all=np.concatenate(all_unc),
-             phase_err_cal_deg_all=np.concatenate(all_cal))
+             phase_err_cal_deg_all=np.concatenate(all_cal),
+             subject_ids=np.concatenate(all_subj))
     print(f"Phase errors    -> {npz_path}")
