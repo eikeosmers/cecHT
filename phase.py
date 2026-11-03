@@ -315,11 +315,11 @@ class ECHT:
         Xf = ifftshift(Xf, axes=0)
         Xf = ifft(Xf, axis=0)
 
-        Xf = self._apply_calibration(Xf, **kwargs)
+        Xf = self._apply_calibration(Xf, n_samples=n_samples, **kwargs)
 
         return Xf[:n_samples, :]
 
-    def _apply_calibration(self, Xf, **kwargs):
+    def _apply_calibration(self, Xf, n_samples=None, **kwargs):
         if self.calibrate and self.calib_gain_ is not None:
             return Xf * self.calib_gain_
         return Xf
