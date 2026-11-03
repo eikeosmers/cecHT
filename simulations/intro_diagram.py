@@ -1,3 +1,4 @@
+
 """
 Create a compact multi-panel infographic comparing the standard Hilbert
 Transform (HT) analytic signal to the Endpoint-Corrected Hilbert Transform
@@ -8,6 +9,7 @@ import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.colors import to_rgba
 import matplotlib.transforms as mtransforms
 from matplotlib.patches import Rectangle, ConnectionPatch
 
@@ -35,10 +37,10 @@ def make_infographic(
     sfreq = 1000,
     f0 = 5.23,        # central frequency of interest
     n_cycles = 1.57,  # number of cycles in the window
-    extra_cycles = 0.2,
-    filt_order = 2,     # Butterworth band-pass order
+    extra_cycles = 1-0.57,
+    filt_order = 2,
     pad_factor = 64,
-    save_base = "../results/ecHT_vs_HT_infographic",
+    save_base = "ecHT_vs_HT_infographic",
     use_tex = True,
 ):
     """
@@ -118,6 +120,12 @@ def make_infographic(
     X_fft_ht = X_fft * h_ht
     X_fft_ht_shift = fftshift(X_fft_ht)
 
+    # Positive- and negative-frequency components of the windowed cosine.
+    x_pos = 0.5 * np.exp(1j * (2 * np.pi * f0 * t_win + phi0))
+    x_neg = np.conj(x_pos)
+    mag_pos = np.abs(fftshift(fft(x_pos, n_fft)))
+    mag_neg = np.abs(fftshift(fft(x_neg, n_fft)))
+
     Wn = [l_freq / (sfreq / 2), h_freq / (sfreq / 2)]
     b, a = butter(filt_order, Wn, btype="band")
 
@@ -177,6 +185,7 @@ def make_infographic(
     yellow = "#EDC948"
     purple = "#B07AA1"
     teal = "#76B7B2"
+    teal = "#2A9D8F"
     gray = "#BAB0AC"
 
     col_sig = blue
@@ -184,6 +193,35 @@ def make_infographic(
     col_ht = yellow
     col_echt = orange
     col_bp = gray
+
+    col_pos = teal
+    col_neg = purple
+
+    def kernel_shadow(ax, f, mag, color, where, zorder):
+        """Opaque filled 'shadow' of a kernel magnitude over a frequency region."""
+        poly = ax.fill_between(f, mag, where=where, color=color, alpha=0.5,
+                               lw=0, zorder=zorder)
+        line, = ax.plot(f, np.where(where, mag, np.nan), color=color,
+                        lw=1 * LINE_WIDTH, zorder=zorder)
+        for path in poly.get_paths():
+            line.set_clip_path(path, ax.transData)
+
+    def layered_shadows(ax, f, pos_mag, neg_mag):
+        """
+        Draw positive/negative frequency shading with alpha=1.
+        - f >= 0: negative-frequency shading in front of positive.
+        - f <= 0: positive-frequency shading in front of negative.
+        """
+        pos_side = f >= 0
+        neg_side = f <= 0
+
+        # Positive-frequency domain: pos behind (z=1), neg in front (z=2)
+        kernel_shadow(ax, f, pos_mag, col_pos, pos_side, zorder=1)
+        kernel_shadow(ax, f, neg_mag, col_neg, pos_side, zorder=2)
+
+        # Negative-frequency domain: neg behind (z=1), pos in front (z=2)
+        kernel_shadow(ax, f, neg_mag, col_neg, neg_side, zorder=1)
+        kernel_shadow(ax, f, pos_mag, col_pos, neg_side, zorder=2)
 
     # 2 × 4 layout with narrower 4th column
     fig, axes = plt.subplots(
@@ -239,29 +277,51 @@ def make_infographic(
     )
 
     # (B) DFT spectrum
-    ax2.plot(freqs_shift, np.abs(X_fft_shift), lw=LINE_WIDTH, color=col_sig)
+    layered_shadows(
+        ax2, freqs_shift,
+        np.minimum(mag_pos, np.abs(X_fft_shift)),
+        np.minimum(mag_neg, np.abs(X_fft_shift)),
+    )
+    ax2.plot(freqs_shift, np.abs(X_fft_shift), lw=LINE_WIDTH, color=col_sig, zorder=3)
     ax2.set_xlim(-3 * f0, 3 * f0)
 
     transB2 = mtransforms.blended_transform_factory(ax2.transData, ax2.transAxes)
-    ax2.text(-f0, y_under, r"$-f_0$", transform=transB2,
+    ax2.text(-f0-0.5, y_under, r"$-f_0$", transform=transB2,
              ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax2.text(0, y_under, r"$0$", transform=transB2,
              ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
-    ax2.text(f0, y_under, r"$+f_0$", transform=transB2,
+    ax2.text(f0+0.5, y_under, r"$+f_0$", transform=transB2,
              ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
 
-    # (C) Analytic spectrum (Hilbert)
-    ax3.plot(freqs_shift, np.abs(X_fft_ht_shift), lw=LINE_WIDTH, color=col_sig)
+    # (C) Analytic spectrum.
+    layered_shadows(
+        ax3, freqs_shift,
+        np.minimum(2 * mag_pos, np.abs(X_fft_ht_shift)),
+        np.minimum(2 * mag_neg, np.abs(X_fft_ht_shift)),
+    )
+    ax3.plot(freqs_shift, np.abs(X_fft_ht_shift), lw=LINE_WIDTH, color=col_sig, zorder=3)
+
+    neg = freqs_shift < 0
+    ax3.plot(freqs_shift[neg], 2 * mag_pos[neg],
+             color=col_pos, ls=(0, (3, 2)), lw=0.5 * LINE_WIDTH, zorder=2.5)
+
+    neg = freqs_shift < 0
+    ax3.plot(freqs_shift[neg], 2 * mag_pos[neg],
+             color=col_pos, ls=(0, (3, 2)), lw=0.5 * LINE_WIDTH, zorder=2)
+
+
+
     ax3.set_xlim(-3 * f0, 3 * f0)
 
     transB3 = mtransforms.blended_transform_factory(ax3.transData, ax3.transAxes)
-    ax3.text(-f0, y_under, r"$-f_0$", transform=transB3,
-             ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
+    # ax3.text(-f0, y_under, r"$-f_0$", transform=transB3,
+    #          ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
     ax3.text(0, y_under, r"$0$", transform=transB3,
              ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
-    ax3.text(f0, y_under, r"$+f_0$", transform=transB3,
+    ax3.text(f0+0.5, y_under, r"$+f_0$", transform=transB3,
              ha="center", va="top", fontsize=TICK_SIZE, clip_on=False)
 
+    from matplotlib.patches import Patch
     # Legend in dedicated axis
     legend_elements = [
         Line2D([0], [0], color=col_true, lw=LINE_WIDTH, ls="-",
@@ -270,6 +330,13 @@ def make_infographic(
                label="HT"),
         Line2D([0], [0], color=col_echt, lw=LINE_WIDTH, ls="-.",
                label="ecHT"),
+        Line2D([0], [0], color=col_bp, lw=0.75*LINE_WIDTH, ls="-",
+               label="Filter"),
+        Patch(facecolor=to_rgba(col_pos, 0.5), edgecolor=col_pos,
+              linewidth=0.5 * LINE_WIDTH, label="Positive\n frequency"),
+        Patch(facecolor=to_rgba(col_neg, 0.5), edgecolor=col_neg,
+              linewidth=0.5 * LINE_WIDTH, label="Negative\n frequency"),
+
     ]
     ax_legend.set_axis_off()
     ax_legend.legend(
