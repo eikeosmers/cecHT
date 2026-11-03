@@ -44,6 +44,9 @@ def _wrap_phase(phi):
     """Wrap phase to [-pi, pi]."""
     return (phi + np.pi) % (2 * np.pi) - np.pi
 
+def _angle_diff(phi1, phi2):
+    """Smallest signed difference phi1 - phi2 in [-pi, pi]."""
+    return _wrap_phase(phi1 - phi2)
 
 def _wmean_angle(mu, w):
     """Weighted circular mean (radians)."""
