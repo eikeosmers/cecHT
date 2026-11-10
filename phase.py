@@ -18,6 +18,7 @@ Schreglmann, S. R., Wang, D., Peach, R. L., Li, J., Zhang, X.,
        Nature communications, 12(1), 363.
 """
 
+import warnings
 from functools import lru_cache
 import numpy as np
 from scipy.signal import butter, bessel, cheby1, cheby2, ellip, sosfreqz
@@ -31,9 +32,9 @@ class ECHT:
     Parameters
     ----------
     l_freq : float or None
-        Low cutoff of band-pass filter (Hz). If None, only high-pass is applied.
+        Low cutoff of band-pass filter (Hz).
     h_freq : float or None
-        High cutoff of band-pass filter (Hz). If None, only low-pass is applied.
+        High cutoff of band-pass filter (Hz).
     sfreq : float
         Sampling rate of the signal.
     n_fft : int or None, optional
@@ -63,6 +64,12 @@ class ECHT:
         Global endpoint calibration gain.
     calib_err_ : dict or None
         Theoretical calibration error metrics.
+
+    Notes
+    -----
+    fit() is a design step: it fixes the FFT length, the filter, and
+    (optionally) the calibration. It does not estimate anything from
+    the data values of X.
     """
 
     # ------------------------------------------------------------------
@@ -80,6 +87,29 @@ class ECHT:
             calibrate=False,
             f0=None,
     ):
+
+        if l_freq is None or h_freq is None:
+            raise NotImplementedError(
+                "One-sided designs (l_freq=None or h_freq=None) are not implemented,"
+                "both cutoffs are required."
+            )
+        if not (0 < l_freq < h_freq < sfreq / 2):
+            raise ValueError(
+                f"Require 0 < l_freq < h_freq < sfreq/2, got l_freq={l_freq}, "
+                f"h_freq={h_freq}, sfreq/2={sfreq / 2}."
+            )
+        if filter_type not in ("butter", "bessel", "cheby1", "cheby2", "ellip"):
+            raise ValueError(
+                f"Unknown filter_type: {filter_type!r}. Must be one of "
+                "'butter', 'bessel', 'cheby1', 'cheby2', 'ellip'."
+            )
+        if calibrate and f0 is None:
+            raise ValueError("f0 must be provided when calibrate=True.")
+
+        self.fft_mode = str(fft_mode).lower()
+        if self.fft_mode not in ("fast", "exact"):
+            raise ValueError("fft_mode must be 'fast' or 'exact'")
+
         self.l_freq = l_freq
         self.h_freq = h_freq
         self.sfreq = sfreq
@@ -98,6 +128,7 @@ class ECHT:
         self.coef_ = None       # band-pass frequency response (column vector)
         self.calib_gain_ = None # complex scalar calibration factor
         self.calib_err_ = None  # dict with theoretical error metrics
+        self.n_calib_ = None    # window length the calibration was derived for
 
 
     # ------------------------------------------------------------------
@@ -229,6 +260,8 @@ class ECHT:
             "Gminus": Gminus,
             "C_opt": C_opt,
             "J_opt": J_opt,
+            "r": abs(Gminus) / abs(Gplus), # leakage ratio
+            "noise_gain": float(np.sum(np.abs(ifft(G)[:N]) ** 2))
         }
 
     # ------------------------------------------------------------------
@@ -249,6 +282,7 @@ class ECHT:
         """
         X = np.asarray(X)
         n_samples = X.shape[0]
+        self.n_calib_ = n_samples
 
         if self.n_fft is None:
             self.n_fft = (
@@ -295,7 +329,7 @@ class ECHT:
 
         return self
 
-    def transform(self, X, **kwargs):
+    def transform(self, X):
         X = np.asarray(X)
         if not np.isrealobj(X):
             X = np.real(X)
@@ -307,6 +341,19 @@ class ECHT:
             X = X[:, np.newaxis]
 
         n_samples = X.shape[0]
+        if n_samples > self.n_fft:
+            raise ValueError(
+                f"X has {n_samples} samples but n_fft={self.n_fft}; "
+                "np.fft.fft would silently truncate X. Increase n_fft."
+            )
+        if(self.calibrate and self.calib_gain_ is not None
+                and n_samples != self.n_calib_):
+            warnings.warn(
+                f"Calibration was derived for N={self.n_calib_} samples but "
+                f"transform() received N={n_samples}; endpoint gains Gplus, Gminus and "
+                "C_opt are window-length specific.",
+                stacklevel=2,
+            )
 
         Xf = fft(X, self.n_fft, axis=0)
         Xf = Xf * self.h_[:, None]
@@ -315,11 +362,11 @@ class ECHT:
         Xf = ifftshift(Xf, axes=0)
         Xf = ifft(Xf, axis=0)
 
-        Xf = self._apply_calibration(Xf, n_samples=n_samples, **kwargs)
+        Xf = self._apply_calibration(Xf)
 
         return Xf[:n_samples, :]
 
-    def _apply_calibration(self, Xf, n_samples=None, **kwargs):
+    def _apply_calibration(self, Xf):
         if self.calibrate and self.calib_gain_ is not None:
             return Xf * self.calib_gain_
         return Xf
